@@ -427,6 +427,7 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
     drivers::bluetooth::poll(&mut ctx);
     drivers::generic::poll(&mut ctx);
     drivers::xinput::poll(&mut ctx);
+    drivers::sinowealth::poll(&mut ctx);
     ctx.out
 }
 

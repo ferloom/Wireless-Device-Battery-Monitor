@@ -35,6 +35,7 @@ pub mod razer;
 pub mod roccat;
 pub mod rongyuan;
 pub mod sdi;
+pub mod sinowealth;
 pub mod sonix;
 pub mod steelseries;
 pub mod wlmouse;
