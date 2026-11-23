@@ -261,6 +261,7 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     }
     let mut ctx = PollContext { colls, ..Default::default() };
     drivers::steelseries::poll(&mut ctx);
+    drivers::logitech_g321::poll(&mut ctx);
     drivers::logitech_g533::poll(&mut ctx);
     drivers::logitech::poll(&mut ctx);
     drivers::razer::poll(&mut ctx);
@@ -389,6 +390,7 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
     }
     // Vendor drivers first, generic fallbacks last (same order as the original chain).
     drivers::steelseries::poll(&mut ctx);
+    drivers::logitech_g321::poll(&mut ctx);
     drivers::logitech_g533::poll(&mut ctx);
     drivers::logitech::poll(&mut ctx);
     drivers::razer::poll(&mut ctx);
