@@ -1,5 +1,5 @@
-//! Mice on CompX's "report 8" protocol (VID 3554, CompX's ODM id, and ATK's 373B): Pulsar X2 V2 /
-//! X2H / X2A / Xlite V3, Kysona M600, ATK VXE R1 SE+, VXE Dragonfly R1 Pro (Max) and the LAMZU
+//! Mice on CompX's "report 8" protocol (VID 3554, CompX's ODM id, ATK's 373B and Pulsar's 3710): Pulsar X2 V2 /
+//! X2H / X2A / Xlite V3, XS-1 TenZ, Kysona M600, ATK VXE R1 SE+, VXE Dragonfly R1 Pro (Max) and the LAMZU
 //! Atlantis / Thorn generation on the "LAMZU 4K Receiver". Each product id is listed explicitly;
 //! nothing else on these vendor ids gets a frame (3554:FA09 / FB40 are AULA keyboards, aula.rs).
 //!
@@ -46,7 +46,7 @@ const fn p(vid: u16, pid: u16, name: &'static str, group: &'static str, cable: b
     Product { vid, pid, name, group, cable }
 }
 
-const PRODUCTS: [Product; 12] = [
+const PRODUCTS: [Product; 14] = [
     p(0x3554, 0xF508, "Pulsar mouse", "pulsar1k", false),
     p(0x3554, 0xF509, "Pulsar mouse", "pulsar4k", false),
     p(0x3554, 0xF507, "Pulsar mouse", "pulsar-cable", true),
@@ -61,6 +61,10 @@ const PRODUCTS: [Product; 12] = [
     // Six LAMZU models (Atlantis OG V2 / Mini / Mini Pro, Thorn, Maya, Paro) share these ids.
     p(0x3554, 0xF510, "LAMZU mouse", "lamzu4k", false),
     p(0x3554, 0xF50F, "LAMZU mouse", "lamzu4k", true),
+    // Pulsar XS-1 8K Gen.2 receiver and its wired TenZ identity; both use report 8.
+    p(0x3710, 0x5406, "Pulsar TenZ", "pulsar-xs1", false),
+    // 3710:3415 / interface 1 / FF02:0002 (17-byte reports), verified with the original BatteryHub.
+    p(0x3710, 0x3415, "Pulsar TenZ", "pulsar-xs1", true),
 ];
 
 pub fn checksum(b: &[u8]) -> u8 {
@@ -123,13 +127,45 @@ fn read(c: &HidColl) -> Option<Reading> {
 
 static NEXT_TRY: Mutex<Option<HashMap<(u16, u16), Instant>>> = Mutex::new(None);
 
+fn key(prod: &Product) -> String {
+    format!("compx:{}", prod.group)
+}
+
+fn presence_anchor(ctx: &PollContext, prod: &Product, vid: u16, pid: u16) -> (u16, u16) {
+    if prod.cable && vid == 0x3710 && ctx.colls.iter().any(|c| c.vid == vid && c.pid == 0x5406) { (vid, 0x5406) } else { (vid, pid) }
+}
+
+fn add_or_merge(ctx: &mut PollContext, mut s: DeviceStatus, prod: &Product, vid: u16, pid: u16) {
+    if let Some(existing) = ctx.out.iter_mut().find(|o| o.key == s.key) {
+        if prod.cable && vid == 0x3710 {
+            existing.percent = s.percent;
+            existing.millivolts = s.millivolts;
+            existing.charging = s.charging;
+            existing.via = std::mem::take(&mut s.via);
+        } else {
+            existing.charging |= s.charging;
+        }
+        ctx.claim(vid, pid);
+    } else {
+        ctx.add(s, vid, pid);
+    }
+}
+
+fn battery_collection(vid: u16, c: &HidColl) -> bool {
+    if vid == 0x3710 {
+        c.page() == 0xFF02 && c.usage() == 0x0002 && c.iface == 1 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
+    } else {
+        c.page() >= 0xFF00 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
+    }
+}
+
 pub fn poll(ctx: &mut PollContext) {
     for prod in &PRODUCTS {
         let (vid, pid) = (prod.vid, prod.pid);
         if ctx.is_claimed(vid, pid) {
             continue;
         }
-        let mut colls = ctx.find(vid, pid, |c| c.page() >= 0xFF00 && c.in_len() as usize == LEN && c.out_len() as usize == LEN);
+        let mut colls = ctx.find(vid, pid, |c| battery_collection(vid, c));
         if colls.is_empty() {
             continue;
         }
@@ -158,27 +194,25 @@ pub fn poll(ctx: &mut PollContext) {
             }
             continue;
         };
-        let key = format!("compx:{}", prod.group);
-        let charging = power || prod.cable;
-        // Receiver and cable both present (charging): one entry.
-        if let Some(o) = ctx.out.iter_mut().find(|o| o.key == key) {
-            o.charging |= charging;
-            ctx.claim(vid, pid);
-            continue;
-        }
+        let logical_key = key(prod);
+        // Pulsar's reply byte 7 is authoritative for both USB and radio. Other cable drivers may
+        // omit that bit, so preserve their established cable-means-powered behavior.
+        let charging = if vid == 0x3710 { power } else { power || prod.cable };
+        // Keep the receiver as the presence anchor when it is also plugged in. That gives the
+        // last-known reading its grace period if the mouse briefly reconnects after cable removal.
         let s = DeviceStatus {
-            key,
+            key: logical_key,
             name: prod.name.into(),
             kind: DeviceKind::Mouse,
             via: if prod.cable { "USB cable" } else { "2.4 GHz receiver" }.into(),
             percent: level,
             charging,
             millivolts: mv,
-            hw: Some((vid, pid)),
+            hw: Some(presence_anchor(ctx, prod, vid, pid)),
             grace_sec: 1800,
             ..Default::default()
         };
-        ctx.add(s, vid, pid);
+        add_or_merge(ctx, s, prod, vid, pid);
     }
 }
 
@@ -230,5 +264,55 @@ mod tests {
         assert!(PRODUCTS.iter().all(|p| !(p.vid == 0x3554 && (p.pid == 0xFA09 || p.pid == 0xFB40))));
         assert!(PRODUCTS.iter().any(|p| p.pid == 0xF58C && p.cable));
         assert!(PRODUCTS.iter().any(|p| p.pid == 0xF510 && !p.cable));
+        assert!(PRODUCTS.iter().any(|p| p.vid == 0x3710 && p.pid == 0x5406 && p.name == "Pulsar TenZ"));
+        assert!(PRODUCTS.iter().any(|p| p.vid == 0x3710 && p.pid == 0x3415 && p.cable));
+    }
+
+    #[test]
+    fn pulsar_uses_only_its_validated_battery_collection() {
+        let coll =
+            |iface, page, usage| HidColl { iface, usage_page: page, usage_id: usage, input_len: LEN as u16, output_len: LEN as u16, ..Default::default() };
+        assert!(battery_collection(0x3710, &coll(1, 0xFF02, 0x0002)));
+        assert!(!battery_collection(0x3710, &coll(2, 0xFF02, 0x0002)));
+        assert!(!battery_collection(0x3710, &coll(1, 0xFF03, 0x0002)));
+        assert!(!battery_collection(0x3710, &coll(1, 0xFF02, 0x0003)));
+        assert!(battery_collection(0x3554, &coll(2, 0xFF03, 0x0002)));
+    }
+
+    #[test]
+    fn pulsar_cable_and_receiver_keep_one_identity_and_charge_state() {
+        let receiver = PRODUCTS.iter().find(|p| p.vid == 0x3710 && p.pid == 0x5406).unwrap();
+        let cable = PRODUCTS.iter().find(|p| p.vid == 0x3710 && p.pid == 0x3415).unwrap();
+        assert_eq!(key(receiver), key(cable));
+
+        let mut ctx = PollContext::default();
+        ctx.colls.push(HidColl { vid: receiver.vid, pid: receiver.pid, ..Default::default() });
+        ctx.add(
+            DeviceStatus {
+                key: key(receiver),
+                name: receiver.name.into(),
+                percent: 95,
+                charging: false,
+                via: "2.4 GHz receiver".into(),
+                hw: Some((receiver.vid, receiver.pid)),
+                ..Default::default()
+            },
+            receiver.vid,
+            receiver.pid,
+        );
+        assert_eq!(presence_anchor(&ctx, cable, cable.vid, cable.pid), (receiver.vid, receiver.pid));
+        add_or_merge(
+            &mut ctx,
+            DeviceStatus { key: key(cable), name: cable.name.into(), percent: 95, charging: true, via: "USB cable".into(), ..Default::default() },
+            cable,
+            cable.vid,
+            cable.pid,
+        );
+        assert_eq!(ctx.out.len(), 1);
+        assert_eq!(ctx.out[0].key, "compx:pulsar-xs1");
+        assert_eq!(ctx.out[0].via, "USB cable");
+        assert!(ctx.out[0].charging);
+        assert_eq!(ctx.out[0].hw, Some((receiver.vid, receiver.pid)));
+        assert!(ctx.is_claimed(cable.vid, cable.pid));
     }
 }
