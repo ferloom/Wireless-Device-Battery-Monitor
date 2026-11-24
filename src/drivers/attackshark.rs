@@ -26,6 +26,10 @@
 //! BatteryHub (GPL-3.0, src/drivers/misc_mice.cpp); Inphic model 73 / 74 from the original's
 //! docs/inphic.md (Inphic HUB's model table). On FA65 state 02 means fully charged (100 %), 03
 //! charging with the last measured level frozen. Event 41 is also sent by the Attack Shark V6.
+//!
+//! Model bytes on FA60, from the original's model table (misc_mice.cpp): 55 X11, 4E X3 Max, E5 V3
+//! Pro, 24 V6, and 10 for the X6 / R1, which reports its level in tens (0..10: `03 10 40 01 09` is
+//! 90 %, issue #8). 47 is the IO Nova SE on its dongle (`03 47 40 01 64`, USB capture in #172).
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
 use crate::hid::HidDev;
 use crate::util::hex4;
@@ -37,6 +41,8 @@ const RECEIVER_8K: u16 = 0xFA65;
 const ON_BATTERY: u8 = 0x01;
 const ON_POWER: u8 = 0x02;
 const CHARGING: u8 = 0x03;
+/// Attack Shark X6 / R1: the level byte counts in tens (0..10).
+const TENS_MODEL: u8 = 0x10;
 /// Frames come about every 2 s; two matching ones are needed.
 const WAIT_MS: u64 = 5500;
 
@@ -55,8 +61,19 @@ pub fn model_name(pid: u16, model: u8) -> &'static str {
         (RECEIVER_8K, 0x73) => "Inphic IN10R MAX",
         (RECEIVER_8K, 0x74) => "Inphic IN10 MAX",
         (RECEIVER_8K, _) => "Wireless mouse",
+        (_, 0x55) => "Attack Shark X11",
+        (_, 0x4E) => "Attack Shark X3 Max",
+        (_, 0xE5) => "Attack Shark V3 Pro",
+        (_, 0x24) => "Attack Shark V6",
+        (_, TENS_MODEL) => "Attack Shark X6 / R1",
+        (_, 0x47) => "IO Nova SE",
         _ => "Attack Shark mouse",
     }
+}
+
+/// The level in percent for a frame's level byte: the X6 / R1 on FA60 counts in tens.
+pub fn percent(pid: u16, model: u8, level: i32) -> i32 {
+    if pid == RECEIVER && model == TENS_MODEL && level <= 10 { level * 10 } else { level }
 }
 
 /// Picks the reading from the frames seen during one poll: the first one confirmed by an equal
@@ -129,7 +146,7 @@ pub fn poll(ctx: &mut PollContext) {
                 DeviceStatus { percent: 100, full: true, charging: true, detail: "fully charged".into(), ..base(pid, Some(model)) }
             }
             Some(((level, state), model)) => DeviceStatus {
-                percent: level,
+                percent: percent(pid, model, level),
                 charging: state == CHARGING,
                 detail: match state {
                     ON_BATTERY => String::new(),
@@ -170,6 +187,18 @@ mod tests {
         assert_eq!(model_name(RECEIVER_8K, 0x73), "Inphic IN10R MAX");
         assert_eq!(model_name(RECEIVER_8K, 0x99), "Wireless mouse");
         assert_eq!(model_name(RECEIVER, 0x3D), "Attack Shark mouse");
+    }
+
+    #[test]
+    fn x6_counts_in_tens() {
+        // Issue #8: an X6 at 100 % sends 03 10 40 01 09 (the top tier).
+        let (level, _) = decode(&[0x03, 0x10, 0x40, 0x01, 0x09]).unwrap();
+        assert_eq!(percent(RECEIVER, 0x10, level), 90);
+        assert_eq!(percent(RECEIVER, 0x10, 10), 100);
+        assert_eq!(percent(RECEIVER, 0x47, 100), 100);
+        assert_eq!(percent(RECEIVER_8K, 0x10, 9), 9);
+        assert_eq!(model_name(RECEIVER, 0x10), "Attack Shark X6 / R1");
+        assert_eq!(model_name(RECEIVER, 0x47), "IO Nova SE");
     }
 
     #[test]

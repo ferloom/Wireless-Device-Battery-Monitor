@@ -1,4 +1,4 @@
-# BatteryHub v1.6 (Rust)
+# BatteryHub v1.6.1 (Rust)
 
 An ultra-lightweight Rust implementation of BatteryHub for Windows, a recode of [krisgfx9/Wireless-Device-Battery-Monitor](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor). All credit for the original idea, look and device protocols goes to the original project.
 
@@ -6,10 +6,16 @@ An ultra-lightweight Rust implementation of BatteryHub for Windows, a recode of 
 
 | File | |
 |---|---|
-| `BatteryHub-Taskbar-Setup-v1.6.exe` | Setup: Install / Update / Uninstall |
+| `BatteryHub-Taskbar-Setup-v1.6.1.exe` | Setup: Install / Update / Uninstall |
 | `SHA256SUMS.txt` | Checksum |
 
 Already installed? Use *Check for updates...* in the right-click menu (v1.1 and later), or run the new setup and click **Update**. Your settings and autostart choice are kept.
+
+## New in v1.6.1
+
+- **New devices:** Gravastar Mercury X (#170), LAMZU 1K Champion (#149), IO Aurora (#151), Red Square Kiro (#153), VGN DragonFly F2 Ultra+ (#166), Corsair Void Wireless v2 (#168) and HS80 RGB Wireless (#161), Keychron Nape Pro on the Link-KM (#142), MCHOSE G3 V2 (#158).
+- **Attack Shark X6 / R1** showed 10 % when full: its level is now read correctly (#8). Mice on the Xenta receiver show their model name (X11, X3 Max, V3 Pro, V6, IO Nova SE).
+- **Refresh battery every 1 / 5 minutes** works again instead of opening another window (#171).
 
 ## New in v1.6
 

@@ -1,5 +1,8 @@
 //! Corsair "Bragi" headset receivers: Virtuoso RGB Wireless (XT) and related models (VID 1B1C,
-//! receivers 0A64, 0A62, 0A3E, 0A3D, 0A97). The Void family's older protocol is in corsair.rs.
+//! receivers 0A64, 0A62, 0A3E, 0A3D, 0A97), the Void Wireless v2 receiver 2A08 (issue #168, listed
+//! by the original) and the HS80 RGB Wireless receiver 0A6B (#161; the original sends Bragi GETs to
+//! every Corsair FF42 64-byte collection, which covers it). The Void family's older protocol is in
+//! corsair.rs.
 //!
 //! Protocol as documented by the original C++ BatteryHub (GPL-3.0, src/drivers/corsair.cpp, which
 //! lists these receivers and follows the Bragi GET framing OpenRGB uses for Corsair's newer
@@ -19,7 +22,7 @@ use crate::hid::{HidColl, HidDev};
 use crate::util::{Deadline, hex4};
 
 const VID: u16 = 0x1B1C;
-const RECEIVERS: [u16; 5] = [0x0A64, 0x0A62, 0x0A3E, 0x0A3D, 0x0A97];
+const RECEIVERS: [u16; 7] = [0x0A64, 0x0A62, 0x0A3E, 0x0A3D, 0x0A97, 0x2A08, 0x0A6B];
 const TARGET_HEADSET: u8 = 0x09;
 pub const PROP_BATTERY: u8 = 0x0F;
 pub const PROP_CHARGE: u8 = 0x10;
@@ -92,6 +95,8 @@ pub fn poll(ctx: &mut PollContext) {
             name: match pid {
                 0x0A64 => "Corsair Virtuoso XT".into(),
                 0x0A97 => "Corsair HS80 MAX Wireless".into(),
+                0x2A08 => "Corsair Void Wireless v2".into(),
+                0x0A6B => "Corsair HS80 RGB Wireless".into(),
                 _ => "Corsair wireless headset".into(),
             },
             kind: DeviceKind::Headset,

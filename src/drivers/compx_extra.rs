@@ -10,6 +10,13 @@
 //! * ATK mice on the "ATK Mouse 8K Dongle" 373B:101B (ATK Fire X 8K and other ATK 8K mice). Listed on
 //!   the same frame by HaloBattery (providers/pulsar.py, CHANGELOG) and BrimDeck (ATK receivers);
 //!   its collections are the CompX family's (FF02:0002 plus FF03..FF06).
+//! * Mice on CompX's newer receivers with the same collections (FF02:0002 17/17 on interface 1 plus
+//!   FF03..FF05): Gravastar Mercury X 3554:F575 (issue #170, read by the original C++ BatteryHub's
+//!   Kysona driver, GPL-3.0, src/drivers/kysona.cpp, which sends this frame to every 3554 receiver
+//!   but the AULA keyboard ones), LAMZU 1K Champion Receiver 3554:F50D (#149), IO Aurora Receiver
+//!   3554:FB08 (#151), Red Square Kiro 1K Receiver 3554:FB5A (#153) and VGN DragonFly F2 Ultra+
+//!   3554:FB49 (#166). A receiver that does not speak the protocol gives no checksummed reply and is
+//!   asked again only once a minute.
 //!
 //! Implemented here from those facts. On interface 1, vendor collection FF02:0002 (17-byte input and
 //! output report 08):
@@ -44,13 +51,18 @@ struct Product {
     cable: bool,
 }
 
-const PRODUCTS: [Product; 4] = [
+const PRODUCTS: [Product; 9] = [
     Product { vid: 0x3554, pid: 0xF5F7, name: "Scyrox V6 / V8", key: "scyrox:v6v8", cable: false },
     Product { vid: 0x3554, pid: 0xF5F6, name: "Scyrox V6 / V8", key: "scyrox:v6v8", cable: true },
     Product { vid: 0x373B, pid: 0x101B, name: "ATK 8K mouse", key: "compx:373b:101b", cable: false },
     // "Wireless mouse 8k dongle-L": ATK A9 Ultimate (HaloBattery providers/pulsar.py), ATK F1 V2
     // (issue #130); BatteryTray (MIT, src/providers/oem_mouse.rs) reads it with the same frame.
     Product { vid: 0x373B, pid: 0x11D9, name: "ATK 8K mouse", key: "compx:373b:11d9", cable: false },
+    Product { vid: 0x3554, pid: 0xF575, name: "Gravastar Mercury X", key: "compx:3554:f575", cable: false },
+    Product { vid: 0x3554, pid: 0xF50D, name: "LAMZU mouse", key: "compx:3554:f50d", cable: false },
+    Product { vid: 0x3554, pid: 0xFB08, name: "IO Aurora", key: "compx:3554:fb08", cable: false },
+    Product { vid: 0x3554, pid: 0xFB5A, name: "Red Square Kiro", key: "compx:3554:fb5a", cable: false },
+    Product { vid: 0x3554, pid: 0xFB49, name: "VGN DragonFly F2 Ultra+", key: "compx:3554:fb49", cable: false },
 ];
 
 #[derive(Debug, PartialEq, Eq)]

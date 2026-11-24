@@ -81,7 +81,8 @@ const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 const PBT_APMSUSPEND: usize = 0x0004;
 /// Battery refresh intervals offered in the menu, in minutes.
 const INTERVALS: [(u32, &str); 5] = [(1, "1 minute"), (5, "5 minutes"), (10, "10 minutes"), (30, "30 minutes"), (60, "1 hour")];
-const ID_INTERVAL_BASE: usize = 10;
+/// 30..34: menu ids 10 / 11 belong to ID_ICONS_MODE / ID_VERSIONS (issue #171).
+const ID_INTERVAL_BASE: usize = 30;
 const ID_ON_CHANGE: usize = 20;
 const MIN_GRACE_SEC: u64 = 150;
 const ID_EXIT: usize = 1;
@@ -95,6 +96,7 @@ const ID_BACKGROUND: usize = 8;
 const ID_SILENT_UPDATE: usize = 9;
 const ID_ICONS_MODE: usize = 10;
 const ID_VERSIONS: usize = 11;
+const _: () = assert!(ID_INTERVAL_BASE > ID_ON_CHANGE && ID_INTERVAL_BASE + INTERVALS.len() <= ID_MONITOR_ALL, "menu ids overlap");
 /// "Show widget on": all monitors, main monitor only, or ID_MONITOR_FIRST + i for one other monitor.
 const ID_MONITOR_ALL: usize = 40;
 const ID_MONITOR_MAIN: usize = 41;
