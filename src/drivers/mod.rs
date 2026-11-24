@@ -40,6 +40,7 @@ pub mod mchose_g3;
 pub mod mchose_glw;
 pub mod mchose_modern;
 pub mod mchose_v9;
+pub mod nzxt;
 pub mod playstation;
 pub mod razer;
 pub mod razer_nari;
