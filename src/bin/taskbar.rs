@@ -18,7 +18,8 @@ use batteryhub::settings;
 use batteryhub::stats::fmt_hours;
 use batteryhub::ui::{self, rgb, split};
 use batteryhub::{DeviceKind, DeviceStatus};
-use windows::Win32::Foundation::{COLORREF, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{COLORREF, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize};
@@ -45,6 +46,8 @@ const WM_TRAY_PROBED: u32 = WM_APP + 8;
 const WM_FOREGROUND: u32 = WM_APP + 20;
 /// A background write of the history finished (wparam: 1 = written).
 const WM_HISTORY_SAVED: u32 = WM_APP + 9;
+#[cfg(feature = "experimental-xaml")]
+const WM_XAML_INPUT: u32 = WM_APP + 0x45A;
 // Not exported by the windows crate's WindowsAndMessaging module.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_POLL: usize = 1;
@@ -148,6 +151,7 @@ const AUTO_UPDATE_RETRIES: u32 = 8;
 static MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static AUTO_UPDATE_TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// How often receivers whose device is off or asleep are checked again.
+#[cfg(not(feature = "experimental-xaml"))]
 const QUICK_MS: u32 = 10_000;
 const WM_DEVICECHANGE_MSG: u32 = 0x0219;
 const DBT_DEVNODES_CHANGED: usize = 0x0007;
@@ -166,15 +170,31 @@ const MIN_GRACE_SEC: u64 = 150;
 const ID_EXIT: usize = 1;
 const ID_REFRESH_DEVICES: usize = 2;
 const ID_REFRESH_LEVELS: usize = 3;
+#[cfg(not(feature = "experimental-xaml"))]
 const ID_CHECK_UPDATES: usize = 4;
 const ID_REQUEST: usize = 5;
+#[cfg(not(feature = "experimental-xaml"))]
 const ID_AUTOSTART: usize = 6;
+#[cfg(not(feature = "experimental-xaml"))]
 const ID_AUTO_UPDATE: usize = 7;
 const ID_BACKGROUND: usize = 8;
+#[cfg(not(feature = "experimental-xaml"))]
 const ID_SILENT_UPDATE: usize = 9;
 const ID_ICONS_MODE: usize = 10;
+#[cfg(not(feature = "experimental-xaml"))]
 const ID_VERSIONS: usize = 11;
 const ID_DASHBOARD: usize = 12;
+#[cfg(feature = "experimental-xaml")]
+const ID_LOCK_WIDGET_POSITION: usize = 16;
+#[cfg(feature = "experimental-xaml")]
+const ID_RESET_WIDGET_POSITION: usize = 17;
+const ID_LAYOUT_GROUPED: usize = 14;
+const ID_LAYOUT_INDIVIDUAL: usize = 15;
+
+#[cfg(feature = "experimental-xaml")]
+fn xaml_device_id(key: &str) -> u64 {
+    key.as_bytes().iter().fold(0xcbf29ce484222325, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)).max(1)
+}
 const _: () = assert!(ID_INTERVAL_BASE > ID_ON_CHANGE && ID_INTERVAL_BASE + INTERVALS.len() <= ID_MONITOR_ALL, "menu ids overlap");
 /// "Show widget on": all monitors, main monitor only, or ID_MONITOR_FIRST + i for one other monitor.
 const ID_MONITOR_ALL: usize = 40;
@@ -207,8 +227,18 @@ const _: () = assert!(
     "menu ids overlap"
 );
 
+#[cfg(feature = "experimental-xaml")]
+pub const MAIN_CLASS: windows::core::PCWSTR = w!("BatteryHub.Experimental.Taskbar.Main");
+#[cfg(not(feature = "experimental-xaml"))]
 pub const MAIN_CLASS: windows::core::PCWSTR = w!("BatteryHub.Taskbar.Main");
+#[cfg(feature = "experimental-xaml")]
+const STRIP_CLASS: windows::core::PCWSTR = w!("BatteryHub.Experimental.Taskbar.Strip");
+#[cfg(not(feature = "experimental-xaml"))]
 const STRIP_CLASS: windows::core::PCWSTR = w!("BatteryHub.Taskbar.Strip");
+#[cfg(feature = "experimental-xaml")]
+const CARD_CLASS: windows::core::PCWSTR = w!("BatteryHub.Experimental.Taskbar.Card");
+#[cfg(not(feature = "experimental-xaml"))]
+const CARD_CLASS: windows::core::PCWSTR = w!("BatteryHub.Taskbar.Card");
 const SETTINGS_KEY: &str = batteryhub::install::TASKBAR.settings_key;
 /// Folder name of this edition's data (%LOCALAPPDATA%\BatteryHub\Taskbar).
 const EDITION: &str = batteryhub::install::TASKBAR.short;
@@ -245,7 +275,11 @@ mod prof {
 /// BH_DEMO (diagnostics and measurements only): two made-up devices on the strip, so the hover
 /// card can be tried and measured without devices at hand. They are never written to the history.
 fn demo_devices() -> Vec<DeviceStatus> {
-    if std::env::var_os("BH_DEMO").is_none() {
+    #[cfg(feature = "experimental-xaml")]
+    let enabled = std::env::var_os("BH_EXPERIMENTAL_DEMO").is_some();
+    #[cfg(not(feature = "experimental-xaml"))]
+    let enabled = std::env::var_os("BH_DEMO").is_some();
+    if !enabled {
         return Vec::new();
     }
     let dev = |key: &str, name: &str, kind: DeviceKind, percent: i32, charging: bool| DeviceStatus {
@@ -421,6 +455,28 @@ struct App {
     shown: Vec<(String, Option<DeviceStatus>)>,
     /// Length of the strip in the last render (width, or height on a vertical taskbar).
     strip_len: i32,
+    #[cfg(feature = "experimental-xaml")]
+    xaml: batteryhub::experimental_xaml::Publisher,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_ready: bool,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_grid_column: i32,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_individual: bool,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_position_locked: bool,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_rects: Vec<batteryhub::experimental_xaml::Rect>,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_device_ids: Vec<u64>,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_device_anchors: Vec<i32>,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_saved_anchors: std::collections::HashMap<String, i32>,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_module_center: Option<i32>,
+    #[cfg(feature = "experimental-xaml")]
+    xaml_hovered_item: Option<usize>,
 }
 
 thread_local! {
@@ -556,13 +612,22 @@ impl Canvas {
 
     /// Fills the canvas with a rounded rectangle, `inset` from the top and bottom edge.
     fn round_rect(&mut self, inset: i32, radius: i32, c: COLORREF, a: u32) {
-        let (w, h, r) = (self.w, self.h, radius.max(1));
+        self.round_rect_region(0, self.w, inset, radius, c, a);
+    }
+
+    /// Fills one horizontally clipped rounded plate without changing the canvas dimensions.
+    fn round_rect_region(&mut self, left: i32, right: i32, inset: i32, radius: i32, c: COLORREF, a: u32) {
+        let (h, r) = (self.h, radius.max(1));
+        let left = left.clamp(0, self.w);
+        let right = right.clamp(left, self.w);
         for y in inset..h - inset {
-            for x in 0..w {
-                let dx = if x < r {
-                    r - x
-                } else if x >= w - r {
-                    x - (w - r - 1)
+            for x in left..right {
+                let local_x = x - left;
+                let width = right - left;
+                let dx = if local_x < r {
+                    r - local_x
+                } else if local_x >= width - r {
+                    local_x - (width - r - 1)
                 } else {
                     0
                 };
@@ -1058,12 +1123,6 @@ impl App {
         let w = ((x + pad).round() as i32).max(1);
         // Alpha 1 everywhere: fully transparent pixels of a layered window let clicks fall through.
         let mut cv = Canvas { w, h, px: vec![0x0100_0000; (w * h) as usize] };
-        if self.background {
-            // Rounded plate in the taskbar's own colour: keeps the text readable on a transparent
-            // or restyled taskbar (e.g. TranslucentTB, Windhawk's Taskbar Styler).
-            let plate = if light { rgb(243, 243, 243) } else { rgb(32, 32, 32) };
-            cv.round_rect(px(4.0), px(6.0), plate, 235);
-        }
         // Each visible device owns its pieces plus half of the gap around them.
         self.hits.clear();
         for (i, it) in items.iter().enumerate() {
@@ -1071,6 +1130,28 @@ impl App {
                 let from = self.hits.last().map(|h| h.1).unwrap_or(0);
                 self.hits.push((from, ranges[i].1 + (dev_gap / 2.0) as i32, v));
             }
+        }
+        if let Some(last) = self.hits.last_mut() {
+            last.1 = w;
+        }
+        if self.background {
+            // Rounded plate in the taskbar's own colour: keeps the text readable on a transparent
+            // or restyled taskbar (e.g. TranslucentTB, Windhawk's Taskbar Styler).
+            let plate = if light { rgb(243, 243, 243) } else { rgb(32, 32, 32) };
+            #[cfg(feature = "experimental-xaml")]
+            if self.xaml_individual {
+                let module_gap = px(3.0);
+                let count = self.hits.len();
+                for (i, &(left, right, _)) in self.hits.iter().enumerate() {
+                    let left = if i == 0 { left } else { left.saturating_add(module_gap) };
+                    let right = if i + 1 == count { right } else { right.saturating_sub(module_gap) };
+                    cv.round_rect_region(left, right, px(4.0), px(6.0), plate, 235);
+                }
+            } else {
+                cv.round_rect(px(4.0), px(6.0), plate, 235);
+            }
+            #[cfg(not(feature = "experimental-xaml"))]
+            cv.round_rect(px(4.0), px(6.0), plate, 235);
         }
         let keys: Vec<String> = items.iter().map(|it| it.key.clone()).collect();
         let moves = self.motion(&keys, &ranges, w, s);
@@ -1096,13 +1177,12 @@ impl App {
                 }
             }
         }
-        if let Some(last) = self.hits.last_mut() {
-            last.1 = w;
-        }
         let resized = self.size.cx != w || self.size.cy != h;
         self.size = SIZE { cx: w, cy: h };
         self.pixels = cv.px;
         self.lit = self.hover_pixels();
+        #[cfg(feature = "experimental-xaml")]
+        self.publish_xaml();
         if !self.popping(self.strip) {
             self.push(self.strip);
         }
@@ -1131,6 +1211,72 @@ impl App {
         // edge stays next to the clock (not only at the next timer tick).
         for i in 0..self.mirrors.len() {
             self.place_mirror_at(i);
+        }
+    }
+
+    #[cfg(feature = "experimental-xaml")]
+    fn publish_xaml(&mut self) {
+        let dpi = unsafe { GetDpiForWindow(self.taskbar) }.max(48);
+        self.xaml_rects.clear();
+        self.xaml_device_ids.clear();
+        self.xaml_device_anchors.clear();
+        for &(left, right, visible_index) in &self.hits {
+            let Some(device) = self.visible_at(visible_index) else { continue };
+            if right <= left {
+                continue;
+            }
+            let key = device.key.clone();
+            let anchor = *self.xaml_saved_anchors.entry(key.clone()).or_insert_with(|| settings::widget_anchor(SETTINGS_KEY, &key));
+            self.xaml_rects.push(batteryhub::experimental_xaml::Rect { left, top: 0, right, bottom: self.size.cy });
+            self.xaml_device_ids.push(xaml_device_id(&key));
+            self.xaml_device_anchors.push(anchor);
+        }
+        let pixels = if self.hovered == self.strip { &self.lit } else { &self.pixels };
+        let compatible = !self.icons_mode && !self.vertical && !self.fallback && !self.primary_hidden && self.offset == 0;
+        self.xaml.set_requested(compatible);
+        let _ = self.xaml.publish(
+            pixels,
+            self.size.cx.max(0) as u32,
+            self.size.cy.max(0) as u32,
+            dpi,
+            &self.xaml_rects,
+            &self.xaml_device_ids,
+            &self.xaml_device_anchors,
+            self.xaml_individual,
+            self.light,
+            self.hovered == self.strip,
+            self.xaml_position_locked,
+            self.xaml_grid_column,
+        );
+        self.sync_xaml_presentation();
+    }
+
+    #[cfg(feature = "experimental-xaml")]
+    fn sync_xaml_presentation(&mut self) {
+        // The native slot is fixed by Windows. Keep legacy offsets and secondary-only
+        // placement functional by returning to the traditional strip for those choices.
+        let compatible = !self.icons_mode && !self.vertical && !self.fallback && !self.primary_hidden && self.offset == 0;
+        self.xaml.set_requested(compatible);
+        let ready = self.xaml.ready_slot();
+        if let Some(slot) = ready.filter(|_| compatible) {
+            let mut p = POINT { x: slot.left, y: slot.top };
+            let _ = unsafe { ScreenToClient(self.taskbar, &mut p) };
+            let _ = unsafe { SetWindowPos(self.strip, None, p.x, p.y, self.size.cx, self.size.cy, SWP_NOACTIVATE | SWP_NOZORDER) };
+            if !self.xaml_ready {
+                let _ = unsafe { ShowWindow(self.strip, SW_HIDE) };
+            }
+            self.xaml_ready = true;
+        } else if self.xaml_ready {
+            self.xaml_ready = false;
+            if !self.strip.0.is_null() {
+                unsafe {
+                    let visible = !self.fallback && !self.primary_hidden;
+                    let _ = ShowWindow(self.strip, if visible { SW_SHOWNA } else { SW_HIDE });
+                }
+            }
+            if !self.fallback && !self.primary_hidden {
+                self.place();
+            }
         }
     }
 
@@ -1241,6 +1387,22 @@ impl App {
         let s = self.scale();
         let mut plate = Canvas { w, h, px: vec![0; (w * h) as usize] };
         let (color, alpha) = if self.light { (rgb(0, 0, 0), 14) } else { (rgb(255, 255, 255), 21) };
+        #[cfg(feature = "experimental-xaml")]
+        if self.xaml_individual {
+            let module_gap = (3.0 * s).round() as i32;
+            let count = self.hits.len();
+            for (i, &(left, right, item)) in self.hits.iter().enumerate() {
+                if self.xaml_hovered_item != Some(item) {
+                    continue;
+                }
+                let left = if i == 0 { left } else { left.saturating_add(module_gap) };
+                let right = if i + 1 == count { right } else { right.saturating_sub(module_gap) };
+                plate.round_rect_region(left, right, (4.0 * s).round() as i32, (4.0 * s).round() as i32, color, alpha);
+            }
+        } else {
+            plate.round_rect((4.0 * s).round() as i32, (4.0 * s).round() as i32, color, alpha);
+        }
+        #[cfg(not(feature = "experimental-xaml"))]
         plate.round_rect((4.0 * s).round() as i32, (4.0 * s).round() as i32, color, alpha);
         self.pixels
             .iter()
@@ -1252,6 +1414,14 @@ impl App {
                 ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0)
             })
             .collect()
+    }
+
+    #[cfg(feature = "experimental-xaml")]
+    fn set_xaml_hovered_item(&mut self, item: Option<usize>) {
+        if self.xaml_hovered_item != item {
+            self.xaml_hovered_item = item;
+            self.lit = self.hover_pixels();
+        }
     }
 
     /// Shows or removes the hover plate when the mouse enters or leaves a strip.
@@ -1413,6 +1583,10 @@ impl App {
         }
         dbg_log(&format!("fallback to notification-area icons: {on}"));
         self.fallback = on;
+        #[cfg(feature = "experimental-xaml")]
+        if on {
+            self.xaml.set_requested(false);
+        }
         if on {
             self.hide_tip();
             self.drop_mirrors();
@@ -1447,6 +1621,8 @@ impl App {
             if self.fallback {
                 self.set_fallback(false);
             }
+            #[cfg(feature = "experimental-xaml")]
+            self.sync_xaml_presentation();
             // Re-render when the taskbar changed height, DPI or theme since the last render
             // (e.g. after leaving a full-screen game).
             if self.render_target() != self.painted_for {
@@ -1476,6 +1652,8 @@ impl App {
         }
         let (bars, hide_primary) = self.chosen_bars();
         self.set_primary_hidden(hide_primary);
+        #[cfg(feature = "experimental-xaml")]
+        self.sync_xaml_presentation();
         // The notification bell or a longer date moves every taskbar's clock: check the Windows 11
         // secondary taskbars again when the main taskbar's notification area changes.
         if !bars.is_empty() {
@@ -1941,6 +2119,10 @@ impl App {
 
     /// Keeps the strip just left of the notification area (checked every second, like the original).
     fn place(&mut self) {
+        #[cfg(feature = "experimental-xaml")]
+        if self.xaml_ready {
+            return;
+        }
         if self.strip.0.is_null() || self.primary_hidden || !self.mirrors_ready {
             return;
         }
@@ -2430,6 +2612,10 @@ impl App {
             let _ = GetMonitorInfoW(MonitorFromWindow(strip, MONITOR_DEFAULTTONEAREST), &mut mi);
             let gap = (8.0 * self.scale()) as i32;
             let work = mi.rcWork;
+            #[cfg(feature = "experimental-xaml")]
+            let center_x = self.xaml_module_center.take().unwrap_or(rc.left + (from + to) / 2);
+            #[cfg(not(feature = "experimental-xaml"))]
+            let center_x = rc.left + (from + to) / 2;
             let (x, y, slide) = if self.vertical {
                 // Beside the taskbar, level with the hovered device (no slide: it fades in).
                 let mid = (mi.rcMonitor.left + mi.rcMonitor.right) / 2;
@@ -2438,7 +2624,7 @@ impl App {
                 // Slides 10 px sideways, away from the taskbar.
                 (x, y, (10.0 * self.scale()) as i32 * if x > rc.left { -1 } else { 1 })
             } else {
-                let x = (rc.left + (from + to) / 2 - w / 2).clamp(work.left + gap, (work.right - w - gap).max(work.left));
+                let x = (center_x - w / 2).clamp(work.left + gap, (work.right - w - gap).max(work.left));
                 let y = if rc.top - h - gap >= work.top { rc.top - h - gap } else { rc.bottom + gap };
                 // Slides 10 px towards its place: up when above the taskbar, down when below it.
                 (x, y, (10.0 * self.scale()) as i32 * if y < rc.top { 1 } else { -1 })
@@ -2467,8 +2653,7 @@ impl App {
             let (bg, border) = self.card_colors();
             let radius = (8.0 * self.scale()).round() as i32;
             let scale = self.scale();
-            self.card_anim =
-                CardAnim {
+            self.card_anim = CardAnim {
                 at: old.at,
                 showing: true,
                 visible: true,
@@ -2487,6 +2672,8 @@ impl App {
                 border,
                 radius,
                 scale,
+                alpha: old.alpha,
+                start_alpha: if old.visible { old.alpha } else { 0 },
             };
             if crossing {
                 self.card_anim.at = Some(Instant::now());
@@ -2595,6 +2782,7 @@ impl App {
         if self.card_anim.prev.take().is_some() {
             self.card_frame(1.0);
         }
+        self.card_anim.start_alpha = self.card_anim.alpha;
         self.card_anim.showing = false;
         self.card_anim.at = Some(Instant::now());
         unsafe {
@@ -2643,7 +2831,8 @@ impl App {
             self.card_anim.drawn = (cx, cw);
         } else {
             let ease = 1.0 - (1.0 - t).powi(3); // ease-out cubic, like Windows 11 flyouts
-            let (fade, dy) = if a.showing { (ease, a.slide as f32 * (1.0 - ease)) } else { (1.0 - t, 0.0) };
+            let fade = card_alpha(a.start_alpha, t, a.showing);
+            let dy = if a.showing { a.slide as f32 * (1.0 - ease) } else { 0.0 };
             // Comes into focus while appearing, goes slightly out of focus while disappearing.
             let r = if a.showing { BLUR_MAX * (1.0 - ease) } else { BLUR_MAX * 0.6 * t };
             let d = dy.round() as i32;
@@ -2652,7 +2841,7 @@ impl App {
             size = SIZE { cx: content.w, cy: h };
             (bx, bw) = (0, content.w);
             layers = vec![(content.clone(), 1.0, (r * scale).round() as i32)];
-            alpha = (fade * 255.0).round() as u8;
+            alpha = fade;
             self.card_anim.drawn = (a.x, content.w);
         }
         self.card_anim.drawn_y = drawn_y;
@@ -2671,6 +2860,7 @@ impl App {
         compose_card(dst, stride, size.cx, size.cy, &bgc, &layers, &mut self.blur_scratch);
         let t1 = Instant::now();
         surface.present(self.card, pos, size, alpha);
+        self.card_anim.alpha = alpha;
         prof::add(&prof::FRAMES, 1);
         prof::add(&prof::COMPOSE_US, (t1 - t0).as_micros() as u64);
         prof::add(&prof::PRESENT_US, t1.elapsed().as_micros() as u64);
@@ -2762,6 +2952,10 @@ impl App {
     /// Mouse at (x, y) on a strip: the device under it (along x, or along y on a vertical taskbar).
     fn hover(&mut self, on: HWND, x: i32, y: i32) {
         if MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            #[cfg(feature = "experimental-xaml")]
+            {
+                self.xaml_module_center = None;
+            }
             return;
         }
         if self.drag.is_some() {
@@ -2776,6 +2970,10 @@ impl App {
             }
         }
         if self.tip.0.is_null() {
+            #[cfg(feature = "experimental-xaml")]
+            {
+                self.xaml_module_center = None;
+            }
             return;
         }
         if on != self.tip_on {
@@ -2784,13 +2982,24 @@ impl App {
             self.tip_for = None;
         }
         unsafe {
-            if !self.tracking {
+            #[cfg(feature = "experimental-xaml")]
+            let xaml_source = self.xaml_ready && on == self.strip;
+            #[cfg(not(feature = "experimental-xaml"))]
+            let xaml_source = false;
+            if xaml_source {
+                // Explorer's XAML surface owns pointer enter/leave; don't track its hidden HWND too.
+                self.tracking = false;
+            } else if !self.tracking {
                 let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: on, dwHoverTime: 0 };
                 self.tracking = TrackMouseEvent(&mut tme).is_ok();
             }
             let hit = self.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| (h.2, h.0, h.1));
             let key = hit.map(|h| h.0).unwrap_or(usize::MAX);
             if self.tip_for == Some(key) {
+                #[cfg(feature = "experimental-xaml")]
+                {
+                    self.xaml_module_center = None;
+                }
                 return;
             }
             self.tip_for = Some(key);
@@ -2812,6 +3021,11 @@ impl App {
         self.hide_card();
         self.tracking = false;
         self.tip_for = None;
+        #[cfg(feature = "experimental-xaml")]
+        {
+            self.xaml_module_center = None;
+            self.xaml_hovered_item = None;
+        }
         if !self.tip.0.is_null() {
             unsafe {
                 let mut ti = tool_info(self.main, &mut [0u16]);
@@ -2823,6 +3037,13 @@ impl App {
     // ---- polling -------------------------------------------------------------------------------
 
     fn start_poll(&mut self) {
+        #[cfg(feature = "experimental-xaml")]
+        if std::env::var_os("BH_EXPERIMENTAL_DEMO").is_some() {
+            self.polling = false;
+            self.loaded = true;
+            self.merge(demo_devices());
+            return;
+        }
         if self.polling {
             // A read (full or quick) is running: if this one is for a device change, do it right
             // after, instead of losing it.
@@ -2840,9 +3061,14 @@ impl App {
         ui::poll_async(self.main, WM_POLL_DONE, rescan);
     }
 
+    /// The experimental tray uses only BatteryHub's normal full polling cadence.
+    #[cfg(feature = "experimental-xaml")]
+    fn start_quick(&mut self) {}
+
     /// Quick read of headset dongles and of receivers whose device is off or asleep (switching a
     /// headset on / off or waking
     /// a mouse is not a device change for Windows).
+    #[cfg(not(feature = "experimental-xaml"))]
     fn start_quick(&mut self) {
         if self.polling || !refresh_on_change() {
             return;
@@ -3328,6 +3554,15 @@ impl App {
         self.background = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetBackground").unwrap_or(0) != 0;
         self.icons_mode = batteryhub::util::reg_get_dword(SETTINGS_KEY, "NotificationIcons").unwrap_or(0) != 0;
         self.choice = widget_choice();
+        #[cfg(feature = "experimental-xaml")]
+        {
+            self.xaml_individual = batteryhub::util::reg_get_dword(SETTINGS_KEY, "ExperimentalIndividual").unwrap_or(0) != 0;
+            self.xaml_position_locked = batteryhub::util::reg_get_dword(SETTINGS_KEY, "LockWidgetPosition").unwrap_or(1) != 0;
+            self.xaml_grid_column = batteryhub::util::reg_get_string(SETTINGS_KEY, "WidgetGridAnchor")
+                .and_then(|value| value.strip_prefix("column:").and_then(|v| v.parse::<i32>().ok()))
+                .filter(|column| (-4097..4096).contains(column))
+                .unwrap_or(-1);
+        }
     }
 }
 
@@ -3464,6 +3699,7 @@ fn on_update_downloaded(main: HWND, result: Result<batteryhub::update::Verified,
 
 /// "Install another version...": the setup kept next to the program opens on its version list
 /// (any release, also an older one; verified like an update).
+#[cfg(not(feature = "experimental-xaml"))]
 fn open_version_list(main: HWND) {
     let setup = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("BatteryHub-Setup.exe")));
     match setup {
@@ -3546,6 +3782,7 @@ fn silent_install() -> bool {
     batteryhub::util::reg_get_dword(SETTINGS_KEY, "SilentUpdates").unwrap_or(0) != 0
 }
 
+#[cfg(not(feature = "experimental-xaml"))]
 fn autostart_name() -> &'static str {
     batteryhub::install::TASKBAR.run_value.unwrap_or("BatteryHub Taskbar")
 }
@@ -3766,7 +4003,9 @@ fn is_our_strip(h: HWND) -> bool {
         GetWindowThreadProcessId(h, Some(&mut pid));
         let mut class = [0u16; 64];
         let n = GetClassNameW(h, &mut class) as usize;
-        pid == std::process::id() && String::from_utf16_lossy(&class[..n]) == "BatteryHub.Taskbar.Strip"
+        pid == std::process::id()
+            && String::from_utf16_lossy(&class[..n])
+                == if cfg!(feature = "experimental-xaml") { "BatteryHub.Experimental.Taskbar.Strip" } else { "BatteryHub.Taskbar.Strip" }
     }
 }
 
@@ -3784,7 +4023,15 @@ fn tool_info(owner: HWND, text: &mut [u16]) -> TTTOOLINFOW {
 fn dbg_log(msg: &str) {
     if std::env::var_os("BH_DEBUG").is_some() {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("bh2.log")) {
+        #[cfg(feature = "experimental-xaml")]
+        let path = std::env::var_os("BH_EXPERIMENTAL_PROFILE").map(std::path::PathBuf::from).map(|p| p.join("logs").join("batteryhub-taskbar.log"));
+        #[cfg(not(feature = "experimental-xaml"))]
+        let path: Option<std::path::PathBuf> = None;
+        let path = path.unwrap_or_else(|| std::env::temp_dir().join("bh2.log"));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{msg}");
         }
     }
@@ -3858,6 +4105,31 @@ unsafe fn show_menu() {
             // Look of the widget: plate behind it, position, and which monitors show it.
             let (choice, offset, background, offset_y, icons_mode) =
                 with_app(|a| (a.choice.clone(), a.offset, a.background, a.offset_y, a.icons_mode)).unwrap_or_default();
+            #[cfg(feature = "experimental-xaml")]
+            let individual = with_app(|a| a.xaml_individual).unwrap_or(false);
+            #[cfg(feature = "experimental-xaml")]
+            if let Ok(sub) = CreatePopupMenu() {
+                let _ = AppendMenuW(sub, MF_STRING | check(!individual), ID_LAYOUT_GROUPED, &windows::core::HSTRING::from(tr("Grouped")));
+                let _ = AppendMenuW(sub, MF_STRING | check(individual), ID_LAYOUT_INDIVIDUAL, &windows::core::HSTRING::from(tr("Individual")));
+                let _ = CheckMenuRadioItem(
+                    sub,
+                    ID_LAYOUT_GROUPED as u32,
+                    ID_LAYOUT_INDIVIDUAL as u32,
+                    if individual { ID_LAYOUT_INDIVIDUAL as u32 } else { ID_LAYOUT_GROUPED as u32 },
+                    MF_BYCOMMAND.0,
+                );
+                let n = GetMenuItemCount(Some(menu));
+                let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, sub.0 as usize, &windows::core::HSTRING::from(tr("Peripheral layout")));
+                icons.set(menu, n as u32, true, ui::glyph::SETTINGS);
+            }
+            #[cfg(feature = "experimental-xaml")]
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | check(icons_mode),
+                ID_ICONS_MODE,
+                &windows::core::HSTRING::from(tr("Show as notification-area icons (Windows arranges them)")),
+            );
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(
                 menu,
                 MF_STRING | check(icons_mode),
@@ -3870,6 +4142,14 @@ unsafe fn show_menu() {
                 ID_BACKGROUND,
                 &windows::core::HSTRING::from(tr("Background behind taskbar text (for translucent taskbars)")),
             );
+            #[cfg(feature = "experimental-xaml")]
+            {
+                let (locked, integrated) = with_app(|a| (a.xaml_position_locked, a.xaml_ready)).unwrap_or((true, false));
+                let enabled = if integrated { MF_ENABLED } else { MF_GRAYED };
+                let _ =
+                    AppendMenuW(menu, MF_STRING | check(locked) | enabled, ID_LOCK_WIDGET_POSITION, &windows::core::HSTRING::from(tr("Lock widget position")));
+                let _ = AppendMenuW(menu, MF_STRING | enabled, ID_RESET_WIDGET_POSITION, &windows::core::HSTRING::from(tr("Reset widget position")));
+            }
             if let Ok(sub) = CreatePopupMenu() {
                 let mut checked = ID_POSITION_CUSTOM;
                 for (i, px) in POSITION_OFFSETS.iter().enumerate() {
@@ -3980,27 +4260,37 @@ unsafe fn show_menu() {
                 icons.set(menu, n as u32, true, ui::glyph::LANGUAGE);
             }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(
                 menu,
                 MF_STRING | check(ui::autostart_enabled(autostart_name())),
                 ID_AUTOSTART,
                 &windows::core::HSTRING::from(tr("Automatically start with Windows")),
             );
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(menu, MF_STRING | check(auto_update()), ID_AUTO_UPDATE, &windows::core::HSTRING::from(tr("Automatically check for updates")));
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(
                 menu,
                 MF_STRING | check(silent_install()) | if auto_update() { MF_ENABLED } else { MF_GRAYED },
                 ID_SILENT_UPDATE,
                 &windows::core::HSTRING::from(tr("Install updates silently")),
             );
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, ID_REQUEST, &windows::core::HSTRING::from(tr("Request support for a device...")));
             icons.set(menu, ID_REQUEST as u32, false, ui::glyph::MAIL);
+            #[cfg(not(feature = "experimental-xaml"))]
             let busy = UPDATE_BUSY.load(std::sync::atomic::Ordering::Relaxed);
+            #[cfg(not(feature = "experimental-xaml"))]
             let label = if busy { tr("Checking for updates...") } else { tr("Check for updates...") };
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(menu, MF_STRING | if busy { MF_GRAYED } else { MF_ENABLED }, ID_CHECK_UPDATES, &windows::core::HSTRING::from(label));
+            #[cfg(not(feature = "experimental-xaml"))]
             icons.set(menu, ID_CHECK_UPDATES as u32, false, ui::glyph::DOWNLOAD);
+            #[cfg(not(feature = "experimental-xaml"))]
             let _ = AppendMenuW(menu, MF_STRING, ID_VERSIONS, &windows::core::HSTRING::from(tr("Install another version...")));
+            #[cfg(not(feature = "experimental-xaml"))]
             icons.set(menu, ID_VERSIONS as u32, false, ui::glyph::HISTORY);
             let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, &windows::core::HSTRING::from(tr("Exit")));
             icons.set(menu, ID_EXIT as u32, false, ui::glyph::EXIT);
@@ -4038,17 +4328,29 @@ unsafe fn show_menu() {
                 ID_REFRESH_LEVELS => {
                     with_app(|a| a.manual_refresh(false));
                 }
+                #[cfg(not(feature = "experimental-xaml"))]
                 ID_CHECK_UPDATES => check_for_updates(main, false),
+                #[cfg(not(feature = "experimental-xaml"))]
                 ID_VERSIONS => open_version_list(main),
+                ID_LAYOUT_GROUPED | ID_LAYOUT_INDIVIDUAL => {
+                    #[cfg(feature = "experimental-xaml")]
+                    with_app(|a| {
+                        a.xaml_individual = cmd.0 as usize == ID_LAYOUT_INDIVIDUAL;
+                        a.icons_mode = false;
+                        save_dword("ExperimentalIndividual", a.xaml_individual as u32);
+                        save_dword("NotificationIcons", 0);
+                        a.set_fallback(false);
+                        a.paint();
+                    });
+                }
                 ID_ICONS_MODE => {
                     let on = with_app(|a| {
-                        a.icons_mode = !a.icons_mode;
+                        let enabled = !a.icons_mode;
+                        a.icons_mode = enabled;
                         save_dword("NotificationIcons", a.icons_mode as u32);
-                        if a.icons_mode {
-                            a.set_fallback(true);
-                        } else {
-                            a.set_fallback(false);
-                            a.tick();
+                        a.set_fallback(a.icons_mode);
+                        if !a.icons_mode {
+                            a.paint();
                         }
                         a.icons_mode
                     })
@@ -4070,6 +4372,31 @@ unsafe fn show_menu() {
                         a.paint();
                     });
                 }
+                #[cfg(feature = "experimental-xaml")]
+                ID_LOCK_WIDGET_POSITION => {
+                    with_app(|a| {
+                        a.xaml_position_locked = !a.xaml_position_locked;
+                        save_dword("LockWidgetPosition", a.xaml_position_locked as u32);
+                        a.publish_xaml();
+                    });
+                }
+                #[cfg(feature = "experimental-xaml")]
+                ID_RESET_WIDGET_POSITION => {
+                    with_app(|a| {
+                        if a.xaml_individual {
+                            for (key, status) in &a.shown {
+                                if status.is_some() {
+                                    let _ = settings::set_widget_anchor(SETTINGS_KEY, key, -1);
+                                    a.xaml_saved_anchors.insert(key.clone(), -1);
+                                }
+                            }
+                        } else {
+                            batteryhub::util::reg_delete_value(SETTINGS_KEY, "WidgetGridAnchor");
+                            a.xaml_grid_column = -1;
+                        }
+                        a.publish_xaml();
+                    });
+                }
                 id if (ID_POSITION_FIRST..ID_POSITION_FIRST + POSITION_OFFSETS.len()).contains(&id) => set_offset(POSITION_OFFSETS[id - ID_POSITION_FIRST]),
                 ID_POSITION_LEFT => set_offset((offset + 10).min(POSITION_MAX)),
                 ID_POSITION_RIGHT => set_offset(offset.saturating_sub(10)),
@@ -4088,6 +4415,7 @@ unsafe fn show_menu() {
                         a.sync_mirrors();
                     });
                 }
+                #[cfg(not(feature = "experimental-xaml"))]
                 ID_AUTOSTART => {
                     let on = !ui::autostart_enabled(autostart_name());
                     ui::set_autostart(autostart_name(), on);
@@ -4096,6 +4424,7 @@ unsafe fn show_menu() {
                         batteryhub::util::reg_delete_value(batteryhub::install::STARTUP_APPROVED_KEY, autostart_name());
                     }
                 }
+                #[cfg(not(feature = "experimental-xaml"))]
                 ID_AUTO_UPDATE => {
                     let on = !auto_update();
                     save_dword("AutoCheckUpdates", on as u32);
@@ -4109,6 +4438,7 @@ unsafe fn show_menu() {
                         );
                     }
                 }
+                #[cfg(not(feature = "experimental-xaml"))]
                 ID_SILENT_UPDATE => {
                     let on = !silent_install();
                     save_dword("SilentUpdates", on as u32);
@@ -4286,7 +4616,7 @@ const TASKBAR_PARTS: [&str; 16] = [
     "TrayButton",
     "TrayShowDesktopButtonWClass",
     "SIBTrayButton",
-    "BatteryHub.Taskbar.Strip",
+    if cfg!(feature = "experimental-xaml") { "BatteryHub.Experimental.Taskbar.Strip" } else { "BatteryHub.Taskbar.Strip" },
 ];
 
 /// x ranges (client coordinates of `bar`) of other programs' windows embedded in the taskbar,
@@ -4407,6 +4737,18 @@ fn shift_left_of(mut left: i32, w: i32, gap: i32, others: &[(i32, i32)]) -> i32 
 }
 
 /// The hover card's animation: what it shows, where it ends up, and how far it slides.
+fn card_alpha(start: u8, progress: f32, showing: bool) -> u8 {
+    let t = progress.clamp(0.0, 1.0);
+    let start = start as f32 / 255.0;
+    let alpha = if showing {
+        let ease = 1.0 - (1.0 - t).powi(3);
+        start + (1.0 - start) * ease
+    } else {
+        start * (1.0 - t)
+    };
+    (alpha * 255.0).round() as u8
+}
+
 #[derive(Default)]
 struct CardAnim {
     /// Start of the running fade, None when it is at rest.
@@ -4438,6 +4780,9 @@ struct CardAnim {
     radius: i32,
     /// DPI scale of the monitor the card is on.
     scale: f32,
+    /// Last alpha actually presented and the alpha at which the current transition began.
+    alpha: u8,
+    start_alpha: u8,
 }
 
 /// The card's bitmap and memory DC, kept while the card is open.
@@ -4505,8 +4850,6 @@ impl Drop for Surface {
     }
 }
 
-const CARD_CLASS: windows::core::PCWSTR = w!("BatteryHub.Taskbar.Card");
-
 /// The hover card: a layered, topmost popup owned by the main window. It takes the mouse (to pick
 /// an hour on its chart) but is never activated.
 fn create_card(owner: HWND) -> HWND {
@@ -4558,6 +4901,10 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
+                #[cfg(feature = "experimental-xaml")]
+                if with_app(|a| a.xaml_ready && hwnd == a.strip).unwrap_or(false) {
+                    return LRESULT(0);
+                }
                 // Re-ordering or redrawing the strip can report a leave while the mouse is still
                 // on it: then keep the card and track again, otherwise close it.
                 let mut pt = POINT::default();
@@ -4602,6 +4949,90 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
 extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            #[cfg(feature = "experimental-xaml")]
+            WM_XAML_INPUT => {
+                let kind = (wp.0 & 0xffff) as u16;
+                let item = ((wp.0 >> 16) & 0xffff) as u16;
+                let point = lp.0 as u32;
+                let (x, y) = ((point & 0xffff) as i32, (point >> 16) as i32);
+                let index = (item != 0xffff).then_some(item as usize);
+                match kind {
+                    1 | 2 => {
+                        with_app(|a| {
+                            let hit = index
+                                .and_then(|n| a.hits.get(n).map(|hit| (hit.0, hit.1, hit.2)))
+                                .filter(|(left, right, _)| x >= *left && x < *right && x < a.size.cx && y < a.size.cy);
+                            if a.xaml_individual {
+                                a.set_xaml_hovered_item(hit.map(|hit| hit.2));
+                            }
+                            if hit.is_some() {
+                                a.hover(a.strip, x, y.max(0));
+                            } else {
+                                a.hide_tip();
+                            }
+                            a.publish_xaml();
+                        });
+                    }
+                    3 => {
+                        with_app(|a| {
+                            if a.xaml_individual {
+                                a.set_xaml_hovered_item(None);
+                            }
+                            a.hide_tip();
+                            a.publish_xaml();
+                        });
+                    }
+                    5 => show_menu(),
+                    6 if index.is_some() => {
+                        let raw = index.unwrap();
+                        let column = if raw & 0x8000 != 0 { -((raw & 0x7fff) as i32) } else { raw as i32 };
+                        if (-4097..4096).contains(&column) && column != -1 {
+                            batteryhub::util::reg_set_string(SETTINGS_KEY, "WidgetGridAnchor", &format!("column:{column}"));
+                            with_app(|a| {
+                                a.xaml_grid_column = column;
+                                a.publish_xaml();
+                            });
+                        }
+                    }
+                    11 if index.is_some() => {
+                        let anchor = lp.0 as i32;
+                        if (-4097..4096).contains(&anchor) {
+                            with_app(|a| {
+                                let key = a.shown.get(index.unwrap()).and_then(|(key, status)| status.as_ref().map(|_| key.clone()));
+                                if let Some(key) = key {
+                                    if settings::set_widget_anchor(SETTINGS_KEY, &key, anchor) {
+                                        a.xaml_saved_anchors.insert(key, anchor);
+                                        a.publish_xaml();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    12 if index.is_some() => {
+                        let screen_center = lp.0 as i32;
+                        with_app(|a| {
+                            if let Some((item, left, right)) = index.and_then(|n| a.hits.get(n).map(|hit| (hit.2, hit.0, hit.1))) {
+                                a.xaml_module_center = Some(screen_center);
+                                a.set_xaml_hovered_item(Some(item));
+                                a.hover(a.strip, (left + right) / 2, 0);
+                            }
+                            a.publish_xaml();
+                        });
+                    }
+                    13 => {
+                        with_app(|a| {
+                            let leaving = index.and_then(|n| a.hits.get(n).map(|hit| hit.2));
+                            if leaving.is_some() && a.xaml_hovered_item == leaving {
+                                a.set_xaml_hovered_item(None);
+                                a.hide_tip();
+                                a.publish_xaml();
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+                LRESULT(0)
+            }
             WM_POLL_DONE => {
                 let devices = ui::take_result(lp);
                 with_app(|a| a.on_result(devices));
@@ -4779,6 +5210,8 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 with_app(|a| {
                     a.save_history_now();
                     a.end_notify();
+                    #[cfg(feature = "experimental-xaml")]
+                    a.xaml.set_requested(false);
                     if !a.strip.0.is_null() {
                         let _ = DestroyWindow(a.strip);
                     }
@@ -4803,6 +5236,12 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         a.painted_for = Default::default();
                         a.tray.clear();
                         a.tick();
+                        #[cfg(feature = "experimental-xaml")]
+                        if !a.taskbar.0.is_null() && a.xaml.restart(a.main, a.taskbar) {
+                            a.xaml.set_requested(true);
+                            a.painted_for = Default::default();
+                            a.paint();
+                        }
                         if a.fallback {
                             a.sync_tray();
                         }
@@ -4817,7 +5256,12 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
 
 fn main() {
     unsafe {
+        #[cfg(feature = "experimental-xaml")]
+        if std::env::var_os("BH_EXPERIMENTAL_PROFILE").is_none() {
+            return;
+        }
         batteryhub::i18n::set_language(&language_choice());
+        let args: Vec<String> = std::env::args().collect();
         // `--report`: only the "Request support for a device" window (also while BatteryHub runs).
         if std::env::args().any(|a| a == "--report") {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -4825,7 +5269,6 @@ fn main() {
             return;
         }
         // `--listen VID:PID`: diagnostic recording of a device's HID reports (see listen.rs).
-        let args: Vec<String> = std::env::args().collect();
         // `--dashboard <tab> <device>` / `--rename <device>`: windows opened from the device menu,
         // each in its own short-lived process.
         if let Some(i) = args.iter().position(|a| a == "--dashboard") {
@@ -4842,9 +5285,16 @@ fn main() {
             batteryhub::listen::run(args.get(i + 1).map(|s| s.as_str()));
             return;
         }
+        #[cfg(feature = "experimental-xaml")]
+        if !args.iter().any(|a| a == "--xaml-preview") && !args.iter().any(|a| ["--dashboard", "--rename", "--report", "--listen"].contains(&a.as_str())) {
+            return;
+        }
         // One instance only (diagnostic runs with BH_DEBUG may start a second one for testing).
         // GetLastError must be read right after CreateMutexW: reading an environment variable that
         // is not set overwrites it (ERROR_ENVVAR_NOT_FOUND), which used to let every copy start.
+        #[cfg(feature = "experimental-xaml")]
+        let _mutex = CreateMutexW(None, true, w!("Local\\BatteryHub.Experimental.Taskbar"));
+        #[cfg(not(feature = "experimental-xaml"))]
         let _mutex = CreateMutexW(None, true, w!("Local\\BatteryHub.Taskbar"));
         let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
         let second_ok = std::env::var_os("BH_DEBUG").is_some() || std::env::var_os("BH_SECOND_INSTANCE").is_some();
@@ -4904,7 +5354,14 @@ fn main() {
                 // widget appears on all taskbars together as soon as their places are known.
                 a.sync_mirrors();
             }
-            a.bt_sig = batteryhub::drivers::bluetooth::connection_signature();
+            #[cfg(feature = "experimental-xaml")]
+            if !a.taskbar.0.is_null() && a.xaml.start(main, a.taskbar) {
+                a.xaml.set_requested(true);
+            }
+            #[cfg(not(feature = "experimental-xaml"))]
+            {
+                a.bt_sig = batteryhub::drivers::bluetooth::connection_signature();
+            }
             a.start_poll();
         });
         SetTimer(Some(main), TIMER_POLL, refresh_minutes() * 60_000, None);
@@ -4920,8 +5377,9 @@ fn main() {
             WINEVENT_OUTOFCONTEXT,
         );
         SetTimer(Some(main), TIMER_BTWATCH, 3000, None);
+        #[cfg(not(feature = "experimental-xaml"))]
         SetTimer(Some(main), TIMER_QUICK, QUICK_MS, None);
-        if auto_update() {
+        if !cfg!(feature = "experimental-xaml") && auto_update() {
             SetTimer(Some(main), TIMER_AUTO_UPDATE, AUTO_UPDATE_DELAY_MS, None);
         }
         // Started by the setup after an update: say so once.

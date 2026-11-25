@@ -220,3 +220,5 @@ Wireless adapter = Trådlös adapter
 {display} (above) = {display} (ovanför)
 {display} (below) = {display} (nedanför)
 Case {level} = Fodral {level}
+Lock widget position = Lås widgetens position
+Reset widget position = Återställ widgetens position

@@ -7,6 +7,10 @@ license = "GPL-3.0-or-later"
 description = "BatteryHub in Rust: battery levels of wireless devices on the Windows taskbar"
 default-run = "batteryhub-taskbar"
 
+[features]
+default = []
+experimental-xaml = []
+
 [lib]
 name = "batteryhub"
 path = "src/lib.rs"
@@ -14,6 +18,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "batteryhub-taskbar"
 path = "src/bin/taskbar.rs"
+
+[[bin]]
+name = "batteryhub-experimental-supervisor"
+path = "src/bin/experimental_supervisor.rs"
+required-features = ["experimental-xaml"]
 
 [dependencies.windows]
 version = "0.62.2"
@@ -67,3 +76,4 @@ strip = true
 
 [build-dependencies]
 embed-resource = "3.0.12"
+cc = "1.2"

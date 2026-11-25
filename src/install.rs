@@ -59,9 +59,9 @@ pub const TASKBAR: Edition = Edition {
     name: "BatteryHub Taskbar",
     short: "Taskbar",
     exe: "batteryhub-taskbar.exe",
-    settings_key: r"Software\BatteryHub\Taskbar",
-    window_class: "BatteryHub.Taskbar.Main",
-    run_value: Some("BatteryHub Taskbar"),
+    settings_key: if cfg!(feature = "experimental-xaml") { r"Software\BatteryHub-Experimental\Taskbar" } else { r"Software\BatteryHub\Taskbar" },
+    window_class: if cfg!(feature = "experimental-xaml") { "BatteryHub.Experimental.Taskbar.Main" } else { "BatteryHub.Taskbar.Main" },
+    run_value: if cfg!(feature = "experimental-xaml") { None } else { Some("BatteryHub Taskbar") },
     description: "Battery levels of your wireless devices, right on the taskbar",
 };
 
@@ -378,7 +378,11 @@ fn terminate(pid: u32) -> bool {
 
 /// Window classes of BatteryHub's windows (the program and the windows it opens in their own
 /// processes: dashboard, rename dialog), asked to close before files are replaced.
-const WINDOW_CLASSES: [&str; 3] = ["BatteryHub.Dashboard", "BatteryHub.Rename", "BatteryHub.Taskbar.Main"];
+const WINDOW_CLASSES: [&str; 3] = if cfg!(feature = "experimental-xaml") {
+    ["BatteryHub.Experimental.Dashboard", "BatteryHub.Experimental.Rename", "BatteryHub.Experimental.Taskbar.Main"]
+} else {
+    ["BatteryHub.Dashboard", "BatteryHub.Rename", "BatteryHub.Taskbar.Main"]
+};
 
 /// Stops every process that runs `exe` (the installed program file, full path): first asks its
 /// windows to close (WM_CLOSE), then, after ~3 s, ends what is still running - but only processes

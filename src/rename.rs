@@ -20,6 +20,9 @@ use crate::gui::{self, Buffer, Face, Fonts, Hits, Theme, rect};
 use crate::i18n::{tr, trf};
 use crate::settings::{self, NAME_MAX};
 
+#[cfg(feature = "experimental-xaml")]
+const CLASS: PCWSTR = w!("BatteryHub.Experimental.Rename");
+#[cfg(not(feature = "experimental-xaml"))]
 const CLASS: PCWSTR = w!("BatteryHub.Rename");
 const SETTINGS_KEY: &str = crate::install::TASKBAR.settings_key;
 const ID_EDIT: i32 = 100;
@@ -31,7 +34,11 @@ const EM_LIMITTEXT: u32 = 0xC5;
 
 /// Message the taskbar program registers to hear about renamed devices.
 pub fn names_changed_message() -> u32 {
-    unsafe { RegisterWindowMessageW(w!("BatteryHub.NamesChanged")) }
+    #[cfg(feature = "experimental-xaml")]
+    let name = w!("BatteryHub.Experimental.NamesChanged");
+    #[cfg(not(feature = "experimental-xaml"))]
+    let name = w!("BatteryHub.NamesChanged");
+    unsafe { RegisterWindowMessageW(name) }
 }
 
 /// Starts the dialog for `s` (one at a time: an open one comes to the front).

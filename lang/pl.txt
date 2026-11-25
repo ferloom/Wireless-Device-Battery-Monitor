@@ -220,3 +220,5 @@ Wireless adapter = Adapter bezprzewodowy
 {display} (above) = {display} (powyżej)
 {display} (below) = {display} (poniżej)
 Case {level} = Etui {level}
+Lock widget position = Zablokuj pozycję widżetu
+Reset widget position = Przywróć pozycję widżetu

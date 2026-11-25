@@ -220,3 +220,5 @@ Wireless adapter = Kablosuz adaptör
 {display} (above) = {display} (üst)
 {display} (below) = {display} (alt)
 Case {level} = Kutu {level}
+Lock widget position = Widget konumunu kilitle
+Reset widget position = Widget konumunu sıfırla

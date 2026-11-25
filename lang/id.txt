@@ -220,3 +220,5 @@ Wireless adapter = Adaptor nirkabel
 {display} (above) = {display} (atas)
 {display} (below) = {display} (bawah)
 Case {level} = Casing {level}
+Lock widget position = Kunci posisi widget
+Reset widget position = Atur ulang posisi widget

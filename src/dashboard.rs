@@ -25,6 +25,9 @@ use crate::history::{self, Point};
 use crate::i18n::{n_, tr, trf};
 use crate::stats::{self, Stats, fmt_hours, fmt_rate};
 
+#[cfg(feature = "experimental-xaml")]
+pub const CLASS: PCWSTR = w!("BatteryHub.Experimental.Dashboard");
+#[cfg(not(feature = "experimental-xaml"))]
 pub const CLASS: PCWSTR = w!("BatteryHub.Dashboard");
 /// Posted by the taskbar program: the history file was written (read it again).
 pub const WM_DASH_RELOAD: u32 = WM_APP + 30;
@@ -36,6 +39,9 @@ pub const COPY_RESET: usize = 2;
 /// To the taskbar program: a dashboard opened, send it every device now.
 pub const COPY_HELLO: usize = 3;
 /// The taskbar program's hidden main window.
+#[cfg(feature = "experimental-xaml")]
+const TASKBAR_CLASS: PCWSTR = w!("BatteryHub.Experimental.Taskbar.Main");
+#[cfg(not(feature = "experimental-xaml"))]
 const TASKBAR_CLASS: PCWSTR = w!("BatteryHub.Taskbar.Main");
 const TIMER_ANIM: usize = 1;
 const KEY_PROP: PCWSTR = w!("BatteryHub.DeviceKey");

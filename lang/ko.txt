@@ -220,3 +220,5 @@ Wireless adapter = 무선 어댑터
 {display} (above) = {display}(위)
 {display} (below) = {display}(아래)
 Case {level} = 케이스 {level}
+Lock widget position = 위젯 위치 잠금
+Reset widget position = 위젯 위치 초기화

@@ -220,3 +220,5 @@ Wireless adapter = Draadloze adapter
 {display} (above) = {display} (boven)
 {display} (below) = {display} (onder)
 Case {level} = Oplaadcase {level}
+Lock widget position = Widgetpositie vergrendelen
+Reset widget position = Widgetpositie herstellen

@@ -220,3 +220,5 @@ Wireless adapter = อะแดปเตอร์ไร้สาย
 {display} (above) = {display} (บน)
 {display} (below) = {display} (ล่าง)
 Case {level} = เคส {level}
+Lock widget position = ล็อกตำแหน่งวิดเจ็ต
+Reset widget position = รีเซ็ตตำแหน่งวิดเจ็ต

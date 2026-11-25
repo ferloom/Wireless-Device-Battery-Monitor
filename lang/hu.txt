@@ -220,3 +220,5 @@ Wireless adapter = Vezeték nélküli adapter
 {display} (above) = {display} (fent)
 {display} (below) = {display} (lent)
 Case {level} = Tok {level}
+Lock widget position = Widget pozíciójának zárolása
+Reset widget position = Widget pozíciójának visszaállítása

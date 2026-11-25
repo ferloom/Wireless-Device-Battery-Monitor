@@ -244,15 +244,21 @@ The strip is a small layered window placed inside the taskbar, left of the notif
 | Vertical taskbar (left or right, Windows 11) | Strip as a column above the notification area; the hover card opens beside the taskbar |
 | Unknown Explorer layout, or the strip cannot be placed for 3 s | **One notification-area icon per device** (level drawn in the icon, a short tooltip and the same menu), back to the strip when possible |
 
+The optional experimental XAML layout also offers `Grouped` and `Individual` peripheral layouts.
+Grouped uses one XAML strip; Individual uses one independently anchored XAML module per device,
+sharing the existing rendered surface, battery monitor, history and host. Native notification icons
+remain the original user-selectable option and the fallback when XAML integration is unavailable. See
+[`docs/experimental-xaml-layout.md`](docs/experimental-xaml-layout.md) for the supported anchors
+and the Explorer-owned nested collections that cannot be modified safely.
+
 ## Supported devices
 
 | Family | Notes |
 |---|---|
 | Logitech | HID++ 1.0 / 2.0 over Unifying, Bolt, LIGHTSPEED, Bluetooth and USB, plus G headsets (voltage curves) |
 | SteelSeries | Arctis 1 / 7 / 9 / Pro, Arctis Nova (3P, 5, 7, 7+, Pro, Pro Omni, Elite; with the dock battery on Pro Wireless, Pro Omni and Elite; Pro Omni and Scimitar below contributed by [Simdrom](https://github.com/Simdrom) in #189), GameBuds, GameBuds X, Aerox, Prime, Rival |
-| Razer | Mice, keyboards and receivers (90-byte feature report protocol); BlackShark V3 headset over its HyperSpeed dongle `1532:057A` or USB cable `1532:0579` (protocol from OpenRazer PR #2794 and Joule); BlackShark V2 Pro (2023) over its HyperSpeed dongle `1532:0555` (protocol from OpenRazer PR #2862 and [blackshark-battery](https://github.com/matej-basic/blackshark-battery), MIT); Barracuda X Chroma over its 2.4 GHz dongle `1532:0574` (protocol from [batterywatch](https://github.com/itayavra/batterywatch), GPL-3.0); Nari over its 2.4 GHz dongle `1532:051C` (request and answer from [RazerNariBatteryLevel](https://github.com/Modzeleczek/RazerNariBatteryLevel)'s Synapse capture, field layout from [HaloBattery](https://github.com/HeyOkay/HaloBattery), MIT, and [BrimDeck](https://github.com/MoFeng2223/BrimDeck), Apache-2.0; level in coarse steps, none while charging) |
-| Razer Barracuda X (2022) | Over its 2.4 GHz dongle `1532:0550` or `1532:0552` (protocol from [barracuda-x-battery](https://github.com/nightdevx/barracuda-x-battery) and [razer-barracuda-x-battery](https://github.com/mehdibouchami/razer-barracuda-x-battery), both MIT) |
-| RAWM | Leviathan V4 and other mice on the RAWM HS Receiver `1915:2346` (protocol from USB captures of RAWM's software, [#188](../../issues/188)) |
+| Razer | Mice, keyboards and receivers use the generic 90-byte feature-report controller; Viper V3 HyperSpeed `1532:00B8` is covered when it exposes the expected 91-byte HID feature collection (physical validation pending). BlackShark V3 headset over its HyperSpeed dongle `1532:057A` or USB cable `1532:0579` (protocol from OpenRazer PR #2794 and Joule); BlackShark V2 Pro (2023) over its HyperSpeed dongle `1532:0555` (protocol from OpenRazer PR #2862 and [blackshark-battery](https://github.com/matej-basic/blackshark-battery), MIT); Barracuda X Chroma over its 2.4 GHz dongle `1532:0574` (protocol from [batterywatch](https://github.com/itayavra/batterywatch), GPL-3.0); Nari over its 2.4 GHz dongle `1532:051C` (request and answer from [RazerNariBatteryLevel](https://github.com/Modzeleczek/RazerNariBatteryLevel)'s Synapse capture, field layout from [HaloBattery](https://github.com/HeyOkay/HaloBattery), MIT, and [BrimDeck](https://github.com/MoFeng2223/BrimDeck), Apache-2.0; level in coarse steps, none while charging) |
+| Razer Barracuda X (2022) | Existing upstream support, unchanged: 2.4 GHz dongle `1532:0550` or `1532:0552` (protocol from [barracuda-x-battery](https://github.com/nightdevx/barracuda-x-battery) and [razer-barracuda-x-battery](https://github.com/mehdibouchami/razer-barracuda-x-battery), both MIT); not physically retested for this contribution |
 | ASUS ROG Pelta | Headset over its 2.4 GHz dongle `0B05:1B84` or USB cable `0B05:1B82` (protocol from [pelta-control](https://github.com/jimm0thy/pelta-control), MIT, from captures of Armoury Crate, as used by the original C++ BatteryHub) |
 | Redragon (Areson) | M913 Impact Elite, M915RGB-WL and other devices on the "2.4G Wireless Receiver" `25A7:FA07` / `FA08`; level in 10 % steps (protocol as documented by the original C++ BatteryHub from a capture of Redragon's software, [m913-ctl](https://github.com/Qehbr/m913-ctl) and [redragon-m913-battery-tray](https://github.com/Doomguy-BFG9000/redragon-m913-battery-tray)) |
 | Corsair | Void family headsets incl. HS70 Pro Wireless `1B1C:0A4F` over the 2.4 GHz receiver (protocol from [HeadsetControl](https://github.com/Sapd/HeadsetControl) and the Linux `hid-corsair-void` driver) |
@@ -425,6 +431,10 @@ This builds the program, then the setup with the program embedded (`installer/`,
 | `examples/list.rs` | Console diagnostics: `cargo run --example list -- --dump --ble`, `-- --update` |
 
 ## Contributors
+
+**Physical validation in this contribution:** no new device driver is added. The existing Barracuda X
+(2022) driver is retained unchanged; the generic Razer driver covers the Viper V3 HyperSpeed only
+when its expected HID collection is present, but that model has not been physically validated here.
 
 BatteryHub is not made by one person alone. Thank you to everyone who helped!
 

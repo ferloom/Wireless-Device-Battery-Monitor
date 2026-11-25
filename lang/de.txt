@@ -220,3 +220,5 @@ Wireless adapter = Funkadapter
 {display} (above) = {display} (oben)
 {display} (below) = {display} (unten)
 Case {level} = Etui {level}
+Lock widget position = Widgetposition sperren
+Reset widget position = Widgetposition zurücksetzen

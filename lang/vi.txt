@@ -220,3 +220,5 @@ Wireless adapter = Bộ chuyển đổi không dây
 {display} (above) = {display} (phía trên)
 {display} (below) = {display} (phía dưới)
 Case {level} = Hộp sạc {level}
+Lock widget position = Khóa vị trí tiện ích
+Reset widget position = Đặt lại vị trí tiện ích

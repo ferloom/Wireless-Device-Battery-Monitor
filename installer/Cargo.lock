@@ -6,6 +6,7 @@ version = 4
 name = "batteryhub"
 version = "1.0.1"
 dependencies = [
+ "cc",
  "embed-resource",
  "windows",
 ]

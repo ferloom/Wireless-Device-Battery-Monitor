@@ -7,6 +7,8 @@ pub mod cardfx;
 pub mod dashboard;
 pub mod device;
 pub mod drivers;
+#[cfg(feature = "experimental-xaml")]
+pub mod experimental_xaml;
 pub mod gui;
 pub mod hid;
 pub mod history;

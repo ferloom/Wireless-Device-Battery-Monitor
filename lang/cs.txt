@@ -220,3 +220,5 @@ Wireless adapter = Bezdrátový adaptér
 {display} (above) = {display} (nahoře)
 {display} (below) = {display} (dole)
 Case {level} = Pouzdro {level}
+Lock widget position = Zamknout polohu widgetu
+Reset widget position = Obnovit polohu widgetu

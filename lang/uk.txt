@@ -220,3 +220,5 @@ Wireless adapter = Бездротовий адаптер
 {display} (above) = {display} (зверху)
 {display} (below) = {display} (знизу)
 Case {level} = Кейс {level}
+Lock widget position = Закріпити положення віджета
+Reset widget position = Скинути положення віджета

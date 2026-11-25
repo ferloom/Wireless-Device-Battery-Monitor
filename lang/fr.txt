@@ -220,3 +220,5 @@ Wireless adapter = Adaptateur sans fil
 {display} (above) = {display} (au-dessus)
 {display} (below) = {display} (en dessous)
 Case {level} = Boîtier {level}
+Lock widget position = Verrouiller la position du widget
+Reset widget position = Réinitialiser la position du widget

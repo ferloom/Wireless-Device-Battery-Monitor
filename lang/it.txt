@@ -220,3 +220,5 @@ Wireless adapter = Adattatore wireless
 {display} (above) = {display} (sopra)
 {display} (below) = {display} (sotto)
 Case {level} = Custodia {level}
+Lock widget position = Blocca posizione del widget
+Reset widget position = Reimposta posizione del widget

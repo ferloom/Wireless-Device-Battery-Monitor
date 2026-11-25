@@ -220,3 +220,5 @@ Wireless adapter = Adaptador sem fio
 {display} (above) = {display} (acima)
 {display} (below) = {display} (abaixo)
 Case {level} = Estojo {level}
+Lock widget position = Bloquear posição do widget
+Reset widget position = Redefinir posição do widget

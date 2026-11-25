@@ -174,7 +174,24 @@ pub fn with_new_first(saved: &[String], new: &[String]) -> Vec<String> {
 pub const FORGET_SECS: u64 = crate::history::KEEP_SECS;
 
 /// Per-device settings, by subkey (a value per device key).
-const DEVICE_SUBKEYS: [&str; 5] = ["Order", "Names", "Hidden", "Thresholds", "Warn5"];
+const DEVICE_SUBKEYS: [&str; 6] = ["Order", "Names", "Hidden", "Thresholds", "Warn5", "WidgetAnchors"];
+
+/// Logical XAML insertion anchor for one peripheral in experimental Individual layout.
+pub fn widget_anchor(settings_key: &str, device_key: &str) -> i32 {
+    inst::open(HKCU, &sub(settings_key, "WidgetAnchors"), false)
+        .and_then(|k| k.get(device_key))
+        .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+        .map(|v| v as i32)
+        .filter(|v| (-4097..4096).contains(v))
+        .unwrap_or(-1)
+}
+
+pub fn set_widget_anchor(settings_key: &str, device_key: &str, anchor: i32) -> bool {
+    if !(-4097..4096).contains(&anchor) {
+        return false;
+    }
+    inst::create(HKCU, &sub(settings_key, "WidgetAnchors")).is_some_and(|k| k.set_dword(device_key, anchor as u32))
+}
 
 fn seen_times(settings_key: &str) -> HashMap<String, u64> {
     inst::open(HKCU, &sub(settings_key, "Seen"), false)

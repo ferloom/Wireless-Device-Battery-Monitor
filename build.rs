@@ -4,6 +4,22 @@
 mod resources;
 
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_EXPERIMENTAL_XAML").is_some() {
+        let publisher = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/experimental_xaml/vendor/publisher");
+        println!("cargo:rerun-if-changed={}", publisher.join("widget_bridge_protocol.h").display());
+        println!("cargo:rerun-if-changed={}", publisher.join("widget_bridge_publisher.h").display());
+        println!("cargo:rerun-if-changed={}", publisher.join("widget_bridge_publisher.cpp").display());
+        println!("cargo:rerun-if-changed={}", publisher.join("publisher_ffi.cpp").display());
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .flag("/EHsc")
+            .include(&publisher)
+            .file(publisher.join("widget_bridge_publisher.cpp"))
+            .file(publisher.join("publisher_ffi.cpp"))
+            .compile("batteryhub_xaml_publisher");
+        println!("cargo:rustc-link-lib=Advapi32");
+    }
     // The app version lives in the VERSION file (Cargo versions cannot have four parts).
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let version = std::fs::read_to_string(root.join("VERSION")).unwrap().trim().to_string();

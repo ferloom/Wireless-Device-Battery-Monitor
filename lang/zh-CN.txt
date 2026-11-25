@@ -220,3 +220,5 @@ Wireless adapter = 无线适配器
 {display} (above) = {display}（上方）
 {display} (below) = {display}（下方）
 Case {level} = 充电盒 {level}
+Lock widget position = 锁定小组件位置
+Reset widget position = 重置小组件位置

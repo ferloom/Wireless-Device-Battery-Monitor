@@ -91,7 +91,15 @@ pub fn sleep_ms(ms: u64) {
 pub fn debug_log(msg: impl FnOnce() -> String) {
     if std::env::var_os("BH_DEBUG").is_some() {
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("bh2.log")) {
+        #[cfg(feature = "experimental-xaml")]
+        let path = std::env::var_os("BH_EXPERIMENTAL_PROFILE").map(std::path::PathBuf::from).map(|p| p.join("logs").join("batteryhub-library.log"));
+        #[cfg(not(feature = "experimental-xaml"))]
+        let path: Option<std::path::PathBuf> = None;
+        let path = path.unwrap_or_else(|| std::env::temp_dir().join("bh2.log"));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{}", msg());
         }
     }
@@ -181,6 +189,10 @@ pub fn pcwstr(w: &[u16]) -> PCWSTR {
 /// `%LOCALAPPDATA%\BatteryHub\<edition>`: data the program keeps (battery history). Separate from
 /// the program folder, so it survives an update and the uninstaller asks before removing it.
 pub fn data_dir(edition: &str) -> std::path::PathBuf {
+    #[cfg(feature = "experimental-xaml")]
+    if let Some(root) = std::env::var_os("BH_EXPERIMENTAL_PROFILE") {
+        return std::path::PathBuf::from(root).join("BatteryHub").join(edition);
+    }
     let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("BatteryHub").join(edition)
 }
