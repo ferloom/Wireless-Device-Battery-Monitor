@@ -5,6 +5,9 @@
 //! taskbar, unknown Explorer layout) it falls back to one notification-area icon per device.
 #![windows_subsystem = "windows"]
 
+#[path = "taskbar/myfinder.rs"]
+mod myfinder;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -139,6 +142,7 @@ const CARD_AWAY_MS: u128 = 300;
 const CARD_CROSS_MS: f32 = 130.0;
 /// Strongest blur of the card's content during its animations (px at 100 % scaling).
 const BLUR_MAX: f32 = 6.0;
+const TIMER_PRESS_FEEDBACK: usize = 8;
 /// Automatic update check this long after start-up; when the network is not up yet (e.g. right
 /// at sign-in) it is tried again every AUTO_UPDATE_RETRY_MS, at most AUTO_UPDATE_RETRIES times.
 const AUTO_UPDATE_DELAY_MS: u32 = 2_000;
@@ -209,6 +213,25 @@ const _: () = assert!(
 
 pub const MAIN_CLASS: windows::core::PCWSTR = w!("BatteryHub.Taskbar.Main");
 const STRIP_CLASS: windows::core::PCWSTR = w!("BatteryHub.Taskbar.Strip");
+const FINDER_STRIP_CLASS: windows::core::PCWSTR = w!("WirelessBatteryWidget");
+
+fn visible_myfinder() -> Option<HWND> {
+    unsafe {
+        let bar = FindWindowW(w!("MyFinderApp"), None).ok()?;
+        if !IsWindowVisible(bar).as_bool() || IsIconic(bar).as_bool() { return None; }
+        let mut bounds = RECT::default();
+        GetWindowRect(bar, &mut bounds).ok()?;
+        let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+        if !(4..=256).contains(&height) || width < 500 { return None; }
+        let monitor = MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() { return None; }
+        let screen = info.rcMonitor;
+        let overlap_w = bounds.right.min(screen.right) - bounds.left.max(screen.left);
+        let overlap_h = bounds.bottom.min(screen.bottom) - bounds.top.max(screen.top);
+        (overlap_w >= (width + 1) / 2 && overlap_h >= (height + 1) / 2).then_some(bar)
+    }
+}
 const SETTINGS_KEY: &str = batteryhub::install::TASKBAR.settings_key;
 /// Folder name of this edition's data (%LOCALAPPDATA%\BatteryHub\Taskbar).
 const EDITION: &str = batteryhub::install::TASKBAR.short;
@@ -282,6 +305,8 @@ struct Tracked {
 #[derive(Default)]
 struct App {
     main: HWND,
+    finder: Option<myfinder::FinderField>,
+    pressed_strip: HWND,
     strip: HWND,
     taskbar: HWND,
     devices: BTreeMap<String, Tracked>,
@@ -978,6 +1003,7 @@ impl App {
     }
 
     fn scale(&self) -> f32 {
+        if self.finder.is_some() { return self.render_target().1 as f32 / 96.0; }
         let dpi = unsafe { GetDpiForWindow(self.taskbar) };
         if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
     }
@@ -1004,7 +1030,7 @@ impl App {
         self.painted_for = self.render_target();
         let s = self.scale();
         let px = |v: f32| (v * s).round() as i32;
-        let light = self.light;
+        let light = self.painted_for.2;
         // Same colours, fonts and spacing as the original C++ widget.
         let fg = if light { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
         let red = ui::low_color(light);
@@ -1090,7 +1116,7 @@ impl App {
             self.paint_column(&pieces, &items, refresh, (tb.right - tb.left).clamp(px(32.0), px(160.0)), s, light);
             return;
         }
-        let h = (tb.bottom - tb.top).clamp(px(24.0), px(64.0));
+        let h = if self.finder.is_some() { (tb.bottom - tb.top).max(1) } else { (tb.bottom - tb.top).clamp(px(24.0), px(64.0)) };
         // The padding comes and goes with the first item and the last one.
         let fmax = items.iter().map(|it| it.f).fold(if refresh { 1.0 } else { 0.0 }, f32::max);
         let pad = px(8.0) as f32 * fmax;
@@ -1123,8 +1149,8 @@ impl App {
         }
         let w = ((x + pad).round() as i32).max(1);
         // Alpha 1 everywhere: fully transparent pixels of a layered window let clicks fall through.
-        let mut cv = Canvas { w, h, px: vec![0x0100_0000; (w * h) as usize] };
-        if self.background {
+        let mut cv = Canvas { w, h, px: vec![if self.finder.is_some() { 0 } else { 0x0100_0000 }; (w * h) as usize] };
+        if self.background && self.finder.is_none() {
             // Rounded plate in the taskbar's own colour: keeps the text readable on a transparent
             // or restyled taskbar (e.g. TranslucentTB, Windhawk's Taskbar Styler).
             let plate = if light { rgb(243, 243, 243) } else { rgb(32, 32, 32) };
@@ -1307,6 +1333,7 @@ impl App {
     /// The last render on the taskbar's hover plate: a rounded, slightly lighter (dark taskbar) or
     /// darker (light taskbar) rectangle behind the content, like the taskbar's own buttons.
     fn hover_pixels(&self) -> Vec<u32> {
+        if self.finder.is_some() { return self.pixels.clone(); }
         let (w, h) = (self.size.cx, self.size.cy);
         let s = self.scale();
         let mut plate = Canvas { w, h, px: vec![0; (w * h) as usize] };
@@ -1358,6 +1385,17 @@ impl App {
         if strip.0.is_null() || px.len() != (w * h) as usize {
             return;
         }
+        let pixels = if self.pressed_strip == strip {
+            std::borrow::Cow::Owned(px.iter().map(|&p| {
+                (0..4).fold(0, |out, i| out | ((((p >> (i * 8)) & 255) * 55 / 100) << (i * 8)))
+            }).collect::<Vec<_>>())
+        } else {
+            std::borrow::Cow::Borrowed(px)
+        };
+        if let Some(finder) = &self.finder {
+            finder.paint(&pixels, w, h);
+            return;
+        }
         unsafe {
             let screen = GetDC(None);
             let mem = CreateCompatibleDC(Some(screen));
@@ -1375,7 +1413,7 @@ impl App {
             };
             let mut bits: *mut c_void = std::ptr::null_mut();
             if let Ok(bmp) = CreateDIBSection(Some(mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
-                std::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u32, px.len());
+                std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
                 let ob = SelectObject(mem, HGDIOBJ(bmp.0));
                 let src = POINT::default();
                 let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
@@ -1395,7 +1433,12 @@ impl App {
         let mut client = RECT::default();
         unsafe {
             let _ = GetClientRect(self.taskbar, &mut client);
-            ((client.right - client.left) << 12 | (client.bottom - client.top), GetDpiForWindow(self.taskbar), self.light)
+            let height = client.bottom - client.top;
+            if let Some(finder) = &self.finder {
+                (height, height.clamp(8, 128) as u32 * 4, finder.light(self.light))
+            } else {
+                ((client.right - client.left) << 12 | height, GetDpiForWindow(self.taskbar), self.light)
+            }
         }
     }
 
@@ -1403,6 +1446,15 @@ impl App {
     /// when the taskbar cannot host it right now: no taskbar / notification area (Explorer is
     /// restarting or uses an unknown layout), or a vertical taskbar.
     fn ensure_strip(&mut self) -> bool {
+        if myfinder::enabled() {
+            if let Some(host) = visible_myfinder() {
+                if self.ensure_finder_strip(host) { return true; }
+            }
+        }
+        if self.finder.take().is_some() {
+            unsafe { if is_our_strip(self.strip) { let _ = DestroyWindow(self.strip); } }
+            self.strip = HWND::default();
+        }
         unsafe {
             // The strip is only valid while it still is a window and a child of a live taskbar; a
             // handle that outlived Explorer can be reused by an unrelated window.
@@ -1457,6 +1509,34 @@ impl App {
             }
         }
         true
+    }
+
+    fn ensure_finder_strip(&mut self, host: HWND) -> bool {
+        unsafe {
+            if self.finder.is_some() && host == self.taskbar && IsWindow(Some(self.strip)).as_bool() {
+                return true;
+            }
+            self.finder = None;
+            if is_our_strip(self.strip) { let _ = DestroyWindow(self.strip); }
+            self.strip = HWND::default();
+            let Ok(hinst) = GetModuleHandleW(None) else { return false };
+            let Ok(strip) = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+                FINDER_STRIP_CLASS, w!("BatteryHub MyFinder"), WS_POPUP,
+                0, 0, 1, 1, None, None, Some(hinst.into()), None,
+            ) else { return false };
+            let Some(finder) = myfinder::FinderField::open(strip, host) else {
+                let _ = DestroyWindow(strip);
+                return false;
+            };
+            self.taskbar = host;
+            self.strip = strip;
+            self.finder = Some(finder);
+            self.vertical = false;
+            self.primary_hidden = false;
+            self.painted_for = Default::default();
+            true
+        }
     }
 
     /// Destroys any other strip window of this process on the taskbar (only `self.strip` may exist).
@@ -1527,7 +1607,8 @@ impl App {
             self.sync_mirrors();
         } else {
             self.fail_ticks += 1;
-            if self.fail_ticks >= FALLBACK_AFTER_TICKS {
+            let fallback_ticks = if myfinder::enabled() { FALLBACK_AFTER_TICKS * 8 } else { FALLBACK_AFTER_TICKS };
+            if self.fail_ticks >= fallback_ticks {
                 self.set_fallback(true);
             }
         }
@@ -1539,6 +1620,7 @@ impl App {
     /// right), next to that taskbar's clock. Taskbars of other monitors exist only when Windows
     /// shows the taskbar on all displays.
     fn sync_mirrors(&mut self) {
+        if self.finder.is_some() { self.drop_mirrors(); return; }
         if self.fallback || self.strip.0.is_null() {
             self.drop_mirrors();
             self.mirrors_ready = true;
@@ -2012,6 +2094,10 @@ impl App {
 
     /// Keeps the strip just left of the notification area (checked every second, like the original).
     fn place(&mut self) {
+        if let Some(finder) = &self.finder {
+            finder.place(self.size.cx, self.size.cy, (8.0 * self.scale()).round() as i32);
+            return;
+        }
         if self.strip.0.is_null() || self.primary_hidden || !self.mirrors_ready {
             return;
         }
@@ -3427,6 +3513,7 @@ static UPDATE_SILENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 static UPDATE_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn check_for_updates(main: HWND, silent: bool) {
+    if myfinder::enabled() { return; }
     if UPDATE_BUSY.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -3837,7 +3924,8 @@ fn is_our_strip(h: HWND) -> bool {
         GetWindowThreadProcessId(h, Some(&mut pid));
         let mut class = [0u16; 64];
         let n = GetClassNameW(h, &mut class) as usize;
-        pid == std::process::id() && String::from_utf16_lossy(&class[..n]) == "BatteryHub.Taskbar.Strip"
+        pid == std::process::id() && matches!(String::from_utf16_lossy(&class[..n]).as_str(),
+            "WirelessBatteryWidget" | "BatteryHub.Taskbar.Strip")
     }
 }
 
@@ -4711,6 +4799,31 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 }
                 LRESULT(0)
             }
+            action @ (WM_LBUTTONDOWN | WM_RBUTTONDOWN) if action == WM_RBUTTONDOWN || with_app(|a| a.finder.is_some()).unwrap_or(false) => {
+                with_app(|a| {
+                    let previous = std::mem::replace(&mut a.pressed_strip, hwnd);
+                    if previous != hwnd && !previous.0.is_null() { a.push(previous); }
+                    a.hide_tip();
+                    a.push(hwnd);
+                });
+                SetTimer(Some(hwnd), TIMER_PRESS_FEEDBACK, 140, None);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == TIMER_PRESS_FEEDBACK => {
+                let _ = KillTimer(Some(hwnd), TIMER_PRESS_FEEDBACK);
+                with_app(|a| {
+                    if a.pressed_strip == hwnd {
+                        a.pressed_strip = HWND::default();
+                        a.push(hwnd);
+                    }
+                });
+                LRESULT(0)
+            }
+            WM_LBUTTONUP if with_app(|a| a.finder.is_some()).unwrap_or(false) => {
+                show_menu(Some(hwnd));
+                LRESULT(0)
+            }
+            WM_ERASEBKGND if with_app(|a| a.finder.is_some()).unwrap_or(false) => LRESULT(1),
             WM_RBUTTONUP => {
                 with_app(|a| a.end_drag());
                 show_menu(Some(hwnd));
@@ -4914,6 +5027,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 with_app(|a| {
                     a.save_history_now();
                     a.end_notify();
+                    a.finder = None;
                     if !a.strip.0.is_null() {
                         let _ = DestroyWindow(a.strip);
                     }
@@ -4992,9 +5106,15 @@ fn main() {
 
         let hinst = GetModuleHandleW(None).unwrap_or_default();
         let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
-        for (class, proc_) in
-            [(MAIN_CLASS, main_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT), (STRIP_CLASS, strip_proc), (CARD_CLASS, card_proc)]
-        {
+        for (class, proc_) in [
+            (
+                MAIN_CLASS,
+                main_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+            ),
+            (STRIP_CLASS, strip_proc),
+            (FINDER_STRIP_CLASS, strip_proc),
+            (CARD_CLASS, card_proc),
+        ] {
             let wc = WNDCLASSEXW {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(proc_),
@@ -5043,7 +5163,7 @@ fn main() {
             a.start_poll();
         });
         SetTimer(Some(main), TIMER_POLL, refresh_minutes() * 60_000, None);
-        SetTimer(Some(main), TIMER_PLACE, 1000, None);
+        SetTimer(Some(main), TIMER_PLACE, if myfinder::enabled() { 125 } else { 1000 }, None);
         // Copies hide over full-screen windows at once, not only at the next placement tick.
         let _ = windows::Win32::UI::Accessibility::SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
