@@ -222,3 +222,6 @@ Wireless adapter = Draadloze adapter
 Case {level} = Oplaadcase {level}
 Lock widget position = Widgetpositie vergrendelen
 Reset widget position = Widgetpositie herstellen
+Grouped = Gegroepeerd
+Individual = Afzonderlijk
+Peripheral layout = Indeling van randapparaten

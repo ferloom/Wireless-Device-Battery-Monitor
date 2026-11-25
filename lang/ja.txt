@@ -222,3 +222,6 @@ Wireless adapter = ワイヤレスアダプター
 Case {level} = ケース {level}
 Lock widget position = ウィジェットの位置をロック
 Reset widget position = ウィジェットの位置をリセット
+Grouped = グループ
+Individual = 個別
+Peripheral layout = 周辺機器の配置

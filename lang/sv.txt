@@ -222,3 +222,6 @@ Wireless adapter = Trådlös adapter
 Case {level} = Fodral {level}
 Lock widget position = Lås widgetens position
 Reset widget position = Återställ widgetens position
+Grouped = Grupperade
+Individual = Enskilda
+Peripheral layout = Placering av kringutrustning

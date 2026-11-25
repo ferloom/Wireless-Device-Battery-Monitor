@@ -222,3 +222,6 @@ Wireless adapter = Adapter bezprzewodowy
 Case {level} = Etui {level}
 Lock widget position = Zablokuj pozycję widżetu
 Reset widget position = Przywróć pozycję widżetu
+Grouped = Grupowane
+Individual = Osobne
+Peripheral layout = Układ urządzeń peryferyjnych

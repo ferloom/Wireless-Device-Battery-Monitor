@@ -222,3 +222,6 @@ Wireless adapter = Bezdrátový adaptér
 Case {level} = Pouzdro {level}
 Lock widget position = Zamknout polohu widgetu
 Reset widget position = Obnovit polohu widgetu
+Grouped = Skupinové
+Individual = Samostatné
+Peripheral layout = Rozložení periferií

@@ -222,3 +222,6 @@ Wireless adapter = Adaptateur sans fil
 Case {level} = Boîtier {level}
 Lock widget position = Verrouiller la position du widget
 Reset widget position = Réinitialiser la position du widget
+Grouped = Groupés
+Individual = Individuels
+Peripheral layout = Disposition des périphériques

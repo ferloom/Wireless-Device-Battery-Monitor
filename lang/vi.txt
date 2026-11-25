@@ -222,3 +222,6 @@ Wireless adapter = Bộ chuyển đổi không dây
 Case {level} = Hộp sạc {level}
 Lock widget position = Khóa vị trí tiện ích
 Reset widget position = Đặt lại vị trí tiện ích
+Grouped = Theo nhóm
+Individual = Riêng lẻ
+Peripheral layout = Bố cục thiết bị ngoại vi

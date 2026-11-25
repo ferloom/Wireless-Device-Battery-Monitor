@@ -222,3 +222,6 @@ Wireless adapter = Adaptor nirkabel
 Case {level} = Casing {level}
 Lock widget position = Kunci posisi widget
 Reset widget position = Atur ulang posisi widget
+Grouped = Berkelompok
+Individual = Individual
+Peripheral layout = Tata letak periferal

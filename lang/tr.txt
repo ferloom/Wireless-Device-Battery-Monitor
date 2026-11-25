@@ -222,3 +222,6 @@ Wireless adapter = Kablosuz adaptör
 Case {level} = Kutu {level}
 Lock widget position = Widget konumunu kilitle
 Reset widget position = Widget konumunu sıfırla
+Grouped = Gruplu
+Individual = Tek tek
+Peripheral layout = Çevre birimi düzeni

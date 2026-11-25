@@ -222,3 +222,6 @@ Wireless adapter = Funkadapter
 Case {level} = Etui {level}
 Lock widget position = Widgetposition sperren
 Reset widget position = Widgetposition zurücksetzen
+Grouped = Gruppiert
+Individual = Einzeln
+Peripheral layout = Anordnung der Peripheriegeräte

@@ -222,3 +222,6 @@ Wireless adapter = 無線轉接器
 Case {level} = 充電盒 {level}
 Lock widget position = 鎖定小工具位置
 Reset widget position = 重設小工具位置
+Grouped = 群組
+Individual = 個別
+Peripheral layout = 周邊裝置配置

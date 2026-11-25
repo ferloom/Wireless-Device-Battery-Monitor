@@ -222,3 +222,6 @@ Wireless adapter = Adaptador inalámbrico
 Case {level} = Estuche {level}
 Lock widget position = Bloquear posición del widget
 Reset widget position = Restablecer posición del widget
+Grouped = Agrupados
+Individual = Individuales
+Peripheral layout = Distribución de periféricos

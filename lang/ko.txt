@@ -222,3 +222,6 @@ Wireless adapter = 무선 어댑터
 Case {level} = 케이스 {level}
 Lock widget position = 위젯 위치 잠금
 Reset widget position = 위젯 위치 초기화
+Grouped = 그룹
+Individual = 개별
+Peripheral layout = 주변 장치 배치

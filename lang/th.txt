@@ -222,3 +222,6 @@ Wireless adapter = อะแดปเตอร์ไร้สาย
 Case {level} = เคส {level}
 Lock widget position = ล็อกตำแหน่งวิดเจ็ต
 Reset widget position = รีเซ็ตตำแหน่งวิดเจ็ต
+Grouped = จัดกลุ่ม
+Individual = แยกกัน
+Peripheral layout = การจัดวางอุปกรณ์ต่อพ่วง

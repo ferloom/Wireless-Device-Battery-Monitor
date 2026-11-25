@@ -222,3 +222,6 @@ Wireless adapter = 无线适配器
 Case {level} = 充电盒 {level}
 Lock widget position = 锁定小组件位置
 Reset widget position = 重置小组件位置
+Grouped = 分组
+Individual = 单独
+Peripheral layout = 外设布局

@@ -222,3 +222,6 @@ Wireless adapter = Бездротовий адаптер
 Case {level} = Кейс {level}
 Lock widget position = Закріпити положення віджета
 Reset widget position = Скинути положення віджета
+Grouped = Згруповано
+Individual = Окремо
+Peripheral layout = Розташування периферійних пристроїв

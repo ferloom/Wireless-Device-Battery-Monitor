@@ -222,3 +222,6 @@ Wireless adapter = Vezeték nélküli adapter
 Case {level} = Tok {level}
 Lock widget position = Widget pozíciójának zárolása
 Reset widget position = Widget pozíciójának visszaállítása
+Grouped = Csoportos
+Individual = Egyéni
+Peripheral layout = Perifériák elrendezése
