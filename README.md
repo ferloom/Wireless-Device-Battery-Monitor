@@ -432,9 +432,12 @@ This builds the program, then the setup with the program embedded (`installer/`,
 
 ## Contributors
 
-**Physical validation in this contribution:** no new device driver is added. The existing Barracuda X
-(2022) driver is retained unchanged; the generic Razer driver covers the Viper V3 HyperSpeed only
-when its expected HID collection is present, but that model has not been physically validated here.
+**Physical validation:** the Logitech ASTRO A50 Gen 5 and Pulsar XS-1 TenZ battery support were
+validated on hardware by the contributor. No new device driver is added here. The Barracuda X
+(2022) driver is retained unchanged and was not retested for this contribution. The generic Razer
+driver covers the Viper V3 HyperSpeed only when its expected HID collection is present; physical
+validation is pending. Royal Kludge RK84 support is not included because its battery protocol could
+not be established reliably.
 
 BatteryHub is not made by one person alone. Thank you to everyone who helped!
 
