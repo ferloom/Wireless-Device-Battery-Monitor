@@ -468,6 +468,8 @@ struct App {
     #[cfg(feature = "experimental-xaml")]
     xaml_rects: Vec<batteryhub::experimental_xaml::Rect>,
     #[cfg(feature = "experimental-xaml")]
+    xaml_hover_rects: Vec<(i32, i32, usize)>,
+    #[cfg(feature = "experimental-xaml")]
     xaml_device_ids: Vec<u64>,
     #[cfg(feature = "experimental-xaml")]
     xaml_device_anchors: Vec<i32>,
@@ -1134,6 +1136,19 @@ impl App {
         if let Some(last) = self.hits.last_mut() {
             last.1 = w;
         }
+        #[cfg(feature = "experimental-xaml")]
+        {
+            self.xaml_hover_rects.clear();
+            // Grouped reserves a 14-DIP content gap. Use the same scaled half-gap for each
+            // Individual hover plate; slot geometry still comes from the shared hit partition.
+            let horizontal_padding = ((dev_gap / 2.0) * fmax).floor() as i32;
+            for (i, it) in items.iter().enumerate() {
+                if let Some(v) = it.vis {
+                    let (left, right) = ranges[i];
+                    self.xaml_hover_rects.push(((left - horizontal_padding).max(0), (right + horizontal_padding).min(w), v));
+                }
+            }
+        }
         if self.background {
             // Rounded plate in the taskbar's own colour: keeps the text readable on a transparent
             // or restyled taskbar (e.g. TranslucentTB, Windhawk's Taskbar Styler).
@@ -1283,6 +1298,8 @@ impl App {
     /// Vertical taskbar: each device as its icon over its level (the bolt beside the level when it
     /// fits), devices stacked, as wide as the taskbar. Hit ranges are rows (y).
     fn paint_column(&mut self, pieces: &[Piece], items: &[Item], refresh: bool, w: i32, s: f32, light: bool) {
+        #[cfg(feature = "experimental-xaml")]
+        self.xaml_hover_rects.clear();
         let px = |v: f32| (v * s).round() as i32;
         let sizes: Vec<(Option<usize>, i32, i32)> = pieces.iter().map(|p| (p.dev, p.m.w, p.m.h)).collect();
         let (pad, dev_gap) = (px(8.0), px(12.0));
@@ -1389,14 +1406,10 @@ impl App {
         let (color, alpha) = if self.light { (rgb(0, 0, 0), 14) } else { (rgb(255, 255, 255), 21) };
         #[cfg(feature = "experimental-xaml")]
         if self.xaml_individual {
-            let module_gap = (3.0 * s).round() as i32;
-            let count = self.hits.len();
-            for (i, &(left, right, item)) in self.hits.iter().enumerate() {
+            for &(left, right, item) in &self.xaml_hover_rects {
                 if self.xaml_hovered_item != Some(item) {
                     continue;
                 }
-                let left = if i == 0 { left } else { left.saturating_add(module_gap) };
-                let right = if i + 1 == count { right } else { right.saturating_sub(module_gap) };
                 plate.round_rect_region(left, right, (4.0 * s).round() as i32, (4.0 * s).round() as i32, color, alpha);
             }
         } else {
