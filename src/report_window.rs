@@ -474,8 +474,8 @@ extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                                 IDC_STATUS,
                                 match (copied, opened) {
                                     (true, true) => {
-                                        "Copied! The device-requests channel on Discord is opening: paste the request there \
-                                         (Ctrl+V) and send it. Not on the server yet? Join at discord.gg/hAbyqpT3EA. Thank you!"
+                                        "Copied! Discord is opening on the device-requests channel (join the server if you aren't \
+                                         on it yet): paste the request there (Ctrl+V) and send it. Thank you!"
                                     }
                                     (true, false) => {
                                         "Copied! Open discord.gg/hAbyqpT3EA, go to the device-requests channel and paste the \

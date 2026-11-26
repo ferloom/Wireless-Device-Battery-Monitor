@@ -316,8 +316,9 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
-/// Discord channel where device requests are posted (the app copies the request, the user pastes it).
-pub const REQUESTS_CHANNEL: &str = "https://discord.com/channels/1575224612567122022/1575518273066373140";
+/// Where device requests are posted: the Discord invite, which joins the server (if needed) and
+/// opens the device-requests channel. The app copies the request, the user pastes it there.
+pub const REQUESTS_CHANNEL: &str = "https://discord.gg/hAbyqpT3EA";
 
 /// The request as one Discord message: the title in bold, then the body. Discord takes at most
 /// 2000 characters, so a longer one is cut at a line end (the HID list is the long part).
