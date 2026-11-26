@@ -1,7 +1,7 @@
 //! "Request support for a device": the device list and the text of the request.
 //!
 //! The window (report_window.rs) lets the user pick a device that is not shown, and *Send* copies
-//! what is shown in the window and opens the device-requests channel on Discord. Nothing is sent
+//! what is shown in the window and opens the device-requests forum on Discord. Nothing is sent
 //! from the app itself: the user pastes the request there and sends it.
 //!
 //! Privacy: the request holds the device name, its type, the user's own notes and a short technical
@@ -316,9 +316,9 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
-/// Where device requests are posted: the Discord invite, which joins the server (if needed) and
-/// opens the device-requests channel. The app copies the request, the user pastes it there.
-pub const REQUESTS_CHANNEL: &str = "https://discord.gg/hAbyqpT3EA";
+/// Where device requests are posted: the Discord invite to the device-requests forum (it joins the
+/// server if needed). The app copies the request; the user makes a post for the device and pastes it.
+pub const REQUESTS_CHANNEL: &str = "https://discord.gg/ST5YWwcCxb";
 
 /// The request as one Discord message: the title in bold, then the body. Discord takes at most
 /// 2000 characters, so a longer one is cut at a line end (the HID list is the long part).

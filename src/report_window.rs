@@ -1,7 +1,7 @@
 //! The "Request support for a device" window (see report.rs for what goes into the request).
 //!
 //! Runs on the UI thread of the program; the device scan runs on a worker thread. *Send* copies the
-//! request and opens the device-requests channel on Discord, where the user pastes it.
+//! request and opens the device-requests forum on Discord, where the user posts it.
 use std::cell::RefCell;
 use std::ffi::c_void;
 
@@ -234,7 +234,7 @@ fn create_controls() {
     add(
         w!("STATIC"),
         "Is one of your devices not shown? Pick it below. Send copies what is shown here and opens the \
-         device-requests channel on BatteryHub's Discord: paste it there and send it.",
+         device-requests forum on BatteryHub's Discord: make a new post for the device and paste it there.",
         0,
         -1,
         L,
@@ -464,8 +464,8 @@ extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     IDC_MODEL | IDC_NAME | IDC_NOTES if code == EN_CHANGE => update_preview(),
                     IDC_SEND | 1 /* IDOK: Enter */ => {
                         if IsWindowEnabled(item(IDC_SEND)).as_bool() {
-                            // Requests go to the device-requests channel on Discord: the request is
-                            // copied, the channel opened, and the user pastes it there.
+                            // Requests go to the device-requests forum on Discord: the request is
+                            // copied, the forum opened, and the user makes a post for the device.
                             let (title, body) = issue();
                             let copied = copy_to_clipboard(h, &report::discord_message(&title, &body));
                             let r = ShellExecuteW(None, w!("open"), &HSTRING::from(report::REQUESTS_CHANNEL), None, None, SW_SHOWNORMAL);
@@ -474,12 +474,12 @@ extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                                 IDC_STATUS,
                                 match (copied, opened) {
                                     (true, true) => {
-                                        "Copied! Discord is opening on the device-requests channel (join the server if you aren't \
-                                         on it yet): paste the request there (Ctrl+V) and send it. Thank you!"
+                                        "Copied! Discord opens the device-requests forum: click New Post, use the device's \
+                                         name as the title, paste the request (Ctrl+V) and post it. Thank you!"
                                     }
                                     (true, false) => {
-                                        "Copied! Open discord.gg/hAbyqpT3EA, go to the device-requests channel and paste the \
-                                         request there (Ctrl+V). Thank you!"
+                                        "Copied! Open discord.gg/ST5YWwcCxb (the device-requests forum), click New Post, use the \
+                                         device's name as the title and paste the request (Ctrl+V). Thank you!"
                                     }
                                     _ => "Couldn't copy the request. Please try again.",
                                 },

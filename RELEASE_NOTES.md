@@ -18,7 +18,7 @@ Already installed? Use *Check for updates...* in the right-click menu (v1.1 and 
 - **Widget position:** *Before the icons* (centred taskbar icons), and *Change position*: move the widget anywhere along the taskbar with the mouse, a click puts it down.
 - **Lock device positions**, **Ring style** (icon inside a ring filled to the level), **Charging animation**, and per device a **Glowing icon**.
 - **Phones (experimental):** a level that stays the same keeps "charging" for 10 minutes, then it ends.
-- **Request support for a device** now goes to the device-requests channel on [Discord](https://discord.gg/hAbyqpT3EA).
+- **Request support for a device** now goes to the device-requests forum on [Discord](https://discord.gg/ST5YWwcCxb): one post per device.
 
 ## New in v1.8
 
