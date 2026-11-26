@@ -22,9 +22,14 @@
 //!     device: [10][index][41][protocol][flags][wpid lo][wpid hi], flags bit 6 = link not established.
 //!   * a sleeping device answers a ping late: Solaar waits up to 4 s; error 0x09 (resource error) /
 //!     0x04 (connect failed) = unreachable, 0x08 = no device with that index.
+//!   * long register 0xB5, sub-register 0x30 + n - 1 = extended pairing information of slot n:
+//!     [sub][serial x4][..]. The serial is the device's unit id (0x0003), so a device keeps the
+//!     key `logi:unit:<serial>` while it sleeps or when reading its unit id fails (issue #586;
+//!     checked on a G515 LS TKL and a G309 on C547 receivers). Bolt keeps it in 0x50 + n.
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
 use crate::hid::{self, HidColl, HidDev};
 use crate::util::{Deadline, guess_kind, hex4, interpolate};
+use std::collections::HashMap;
 
 const SW_ID: u8 = 0x0D;
 
@@ -135,8 +140,10 @@ struct Slot {
     idx: u8,
     kind: DeviceKind,
     link: Option<bool>,
-    /// Serial from the Bolt pairing register (the device's unit id), so a sleeping device keeps
-    /// the same key it had when it answered.
+    /// Wireless product id from the pairing register.
+    wpid: u16,
+    /// Serial from the pairing register (the device's unit id), so a sleeping device keeps the
+    /// same key it had when it answered.
     serial: Option<u32>,
 }
 
@@ -175,6 +182,15 @@ fn parse_bolt_pairing(sub: u8, p: &[u8]) -> Option<(u16, u8, Option<u32>)> {
     Some((wpid, p[1] & 0x0F, serial))
 }
 
+/// Reply parameters of a 0xB5 read of extended pairing sub-register `sub` (0x30 + n - 1) ->
+/// serial. Layout as Solaar reads it: [sub][serial x4][..].
+fn parse_ext_pairing(sub: u8, p: &[u8]) -> Option<u32> {
+    if p.len() < 5 || p[0] != sub {
+        return None;
+    }
+    Some(u32::from_be_bytes([p[1], p[2], p[3], p[4]])).filter(|&v| v != 0 && v != u32::MAX)
+}
+
 /// A 0x41 device connection notification -> (device index, link established).
 fn parse_link_notification(r: &[u8]) -> Option<(u8, bool)> {
     if r.len() < 7 || r[0] != 0x10 || r[2] != 0x41 || r[3] == 0 || !(1..=6).contains(&r[1]) {
@@ -195,9 +211,15 @@ fn receiver_slots(h: &Hidpp, bolt: bool) -> Option<Vec<Slot>> {
             Reply::Ok(p) => {
                 answered = true;
                 let parsed = if bolt { parse_bolt_pairing(sub, &p) } else { parse_pairing(sub, &p).map(|(w, k)| (w, k, None)) };
-                if let Some((wpid, kind, serial)) = parsed {
+                if let Some((wpid, kind, mut serial)) = parsed {
+                    if !bolt {
+                        let ext = 0x30 + n - 1;
+                        if let Reply::Ok(p) = h.request(0xFF, 0x83, 0xB5, &[ext], true, 900) {
+                            serial = parse_ext_pairing(ext, &p);
+                        }
+                    }
                     crate::util::debug_log(|| format!("  slot {n}: paired, wpid {}, kind {kind}, serial {serial:08X?}", hex4(wpid)));
-                    slots.push(Slot { idx: n, kind: pairing_kind(kind), link: None, serial });
+                    slots.push(Slot { idx: n, kind: pairing_kind(kind), link: None, wpid, serial });
                 }
             }
             Reply::Err(e) => {
@@ -414,6 +436,33 @@ fn read_battery10(h: &Hidpp, idx: u8, s: &mut DeviceStatus) -> bool {
     false
 }
 
+/// A device behind a receiver: the receiver's `physical_key`, the index and the wpid (0 without a
+/// pairing register).
+type UnitSlot = (String, u8, u16);
+
+/// Unit ids read while devices answered: a device keeps its `logi:unit:` key when reading the unit
+/// id fails or it sleeps and its receiver has no serial for it (issue #586).
+static UNIT_IDS: std::sync::Mutex<Option<HashMap<UnitSlot, String>>> = std::sync::Mutex::new(None);
+
+/// The unit id for a device's key: the one just read, else the receiver's serial for the slot,
+/// else the one remembered from an earlier read.
+fn stable_unit(read: &str, serial: Option<u32>, remembered: Option<String>) -> Option<String> {
+    if !read.is_empty() {
+        return Some(read.to_string());
+    }
+    serial.map(|v| format!("{v:08X}")).or(remembered)
+}
+
+fn remember_unit(id: &UnitSlot, unit: &str) {
+    if let Ok(mut m) = UNIT_IDS.lock() {
+        m.get_or_insert_with(HashMap::new).insert(id.clone(), unit.to_string());
+    }
+}
+
+fn remembered_unit(id: &UnitSlot) -> Option<String> {
+    UNIT_IDS.lock().ok()?.as_ref()?.get(id).cloned()
+}
+
 /// Identifies the physical device a HID collection belongs to, so two receivers with the same
 /// product id are polled separately (strips "&colNN" and the last "&NNNN" of the instance part).
 fn physical_key(c: &HidColl) -> String {
@@ -480,6 +529,7 @@ fn poll_device(ctx: &mut PollContext, pid: u16, shorts: &[HidColl], longs: &[Hid
         s.kind = if passthrough { DeviceKind::Mouse } else { guess_kind(&s.name) };
 
         let slot = slots.as_ref().and_then(|v| v.iter().find(|s| s.idx == idx).copied());
+        let unit_id = (physical_key(main), idx, slot.map_or(0, |sl| sl.wpid));
         if let Some(sl) = slot
             && sl.kind != DeviceKind::Other
         {
@@ -500,8 +550,13 @@ fn poll_device(ctx: &mut PollContext, pid: u16, shorts: &[HidColl], longs: &[Hid
             Reply::Ok(p) if p.len() >= 3 && p[0] >= 2 => {
                 read_name_and_type20(&h, idx, &mut s);
                 found = read_battery20(&h, idx, pid, &mut s);
-                let unit = if found { read_unit_id20(&h, idx) } else { String::new() };
-                if !unit.is_empty() {
+                let read = if found { read_unit_id20(&h, idx) } else { String::new() };
+                if !read.is_empty() {
+                    remember_unit(&unit_id, &read);
+                }
+                let unit = if found { stable_unit(&read, slot.and_then(|sl| sl.serial), remembered_unit(&unit_id)) } else { None };
+                if let Some(unit) = unit {
+                    crate::util::debug_log(|| format!("  index {idx}: unit id '{read}', key unit {unit}"));
                     s.key = format!("logi:unit:{unit}");
                     if idx == 0xFF {
                         s.grace_sec = 60;
@@ -531,8 +586,8 @@ fn poll_device(ctx: &mut PollContext, pid: u16, shorts: &[HidColl], longs: &[Hid
                 DeviceKind::Keyboard => "Logitech wireless keyboard".into(),
                 _ => s.name,
             };
-            if let Some(serial) = slot.and_then(|sl| sl.serial) {
-                s.key = format!("logi:unit:{serial:08X}");
+            if let Some(unit) = stable_unit("", slot.and_then(|sl| sl.serial), remembered_unit(&unit_id)) {
+                s.key = format!("logi:unit:{unit}");
             }
             s.connected = false;
             s.vid = 0x046D;
@@ -635,6 +690,35 @@ mod tests {
         assert_eq!(parse_bolt_pairing(0x52, &[0x52, 0, 0, 0, 0, 0, 0, 0]), None); // empty slot
         assert_eq!(parse_bolt_pairing(0x51, &p[..4]), Some((0xB378, 1, None)));
         assert_eq!(format!("{:08X}", 0x8D76_0B87u32), "8D760B87"); // same form as read_unit_id20
+    }
+
+    #[test]
+    fn extended_pairing_register() {
+        // 0xB5 sub 0x30 (slot 1) of two C547 receivers; the serials are the unit ids the devices
+        // report (0x0003): G515 LS TKL F550A06C, G309 LIGHTSPEED 5E50C067.
+        let keyboard = [0x30, 0xF5, 0x50, 0xA0, 0x6C, 0x0E, 0x40, 0xA0, 0x01, 0x07, 0, 0, 0, 0, 0, 0];
+        let mouse = [0x30, 0x5E, 0x50, 0xC0, 0x67, 0x0E, 0x40, 0xA0, 0x00, 0x0F, 0, 0, 0, 0, 0, 0];
+        assert_eq!(parse_ext_pairing(0x30, &keyboard), Some(0xF550_A06C));
+        assert_eq!(parse_ext_pairing(0x30, &mouse), Some(0x5E50_C067));
+        assert_eq!(parse_ext_pairing(0x31, &keyboard), None); // another slot's reply
+        assert_eq!(parse_ext_pairing(0x31, &[0x31, 0, 0, 0, 0, 0, 0, 0]), None); // no serial
+        assert_eq!(parse_ext_pairing(0x30, &keyboard[..4]), None);
+    }
+
+    #[test]
+    fn a_device_keeps_its_unit_key() {
+        // The unit id just read wins; then the receiver's serial; then the one remembered.
+        assert_eq!(stable_unit("F550A06C", Some(0x1234_5678), Some("AAAAAAAA".into())).as_deref(), Some("F550A06C"));
+        assert_eq!(stable_unit("", Some(0xF550_A06C), Some("AAAAAAAA".into())).as_deref(), Some("F550A06C"));
+        assert_eq!(stable_unit("", None, Some("F550A06C".into())).as_deref(), Some("F550A06C"));
+        assert_eq!(stable_unit("", None, None), None); // first read failed, nothing known: slot key
+        // Remembered per receiver, index and wpid.
+        let id = ("test-receiver#586".to_string(), 1, 0x40B4);
+        assert_eq!(remembered_unit(&id), None);
+        remember_unit(&id, "F550A06C");
+        assert_eq!(remembered_unit(&id).as_deref(), Some("F550A06C"));
+        assert_eq!(remembered_unit(&("test-receiver#586".to_string(), 1, 0x40B1)), None); // another device paired there
+        assert_eq!(remembered_unit(&("test-receiver#586".to_string(), 2, 0x40B4)), None);
     }
 
     #[test]
