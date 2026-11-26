@@ -4612,9 +4612,8 @@ https://github.com/{}/releases",
     }
 }
 
-/// Hands memory that was only needed for a moment (a read, a Bluetooth check, a render) back to
-/// Windows, so between those moments the program keeps well under 1 MB resident. Pages it needs
-/// again come back from the standby list (soft faults), which costs microseconds.
+/// Release resident pages after a full poll, card dismissal or update. Keep pages warm
+/// across periodic ticks, quick reads and foreground changes.
 fn trim_memory() {
     unsafe {
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
@@ -6169,15 +6168,10 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                                 a.bt_sig = sig;
                                 SetTimer(Some(hwnd), TIMER_DEVCHANGE, 1500, None);
                             }
-                            trim_memory();
                         }
                     }
                     _ => a.tick(),
                 });
-                // Every tick touches data pages of user32 / GDI / UI Automation, which count as the
-                // process's own memory: hand them back right away, so Task Manager shows ~0.2 MB
-                // nearly all the time instead of ~0.75 MB between the slower trims.
-                trim_memory();
                 LRESULT(0)
             }
             // A device was plugged in / removed (USB receiver, cable, Bluetooth link) or the PC woke
@@ -6194,7 +6188,6 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 let devices = ui::take_result(lp);
                 let ids = QUICK_IDS.with(|q| std::mem::take(&mut *q.borrow_mut()));
                 with_app(|a| a.on_quick_result(devices, &ids));
-                trim_memory();
                 LRESULT(0)
             }
             WM_FOREGROUND => {
@@ -6215,7 +6208,6 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     }
                     a.sync_mirrors();
                 });
-                trim_memory();
                 LRESULT(0)
             }
             WM_SHOW_UPDATED => {

@@ -2,7 +2,7 @@
 //! broadcasts (AirPods proximity messages and Google Fast Pair). It only listens; nothing is sent.
 //! Port of ble_adverts.cpp / fastpair.cpp, using the `windows` crate's WinRT projection instead of
 //! hand-written ABI declarations.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -234,12 +234,44 @@ fn gatt_failed() -> &'static Mutex<HashMap<u64, Instant>> {
 /// always bring it back for the next one, so the level stayed at its first value.
 struct Link {
     _device: windows::Devices::Bluetooth::BluetoothLEDevice,
-    _session: Option<windows::Devices::Bluetooth::GenericAttributeProfile::GattSession>,
+    session: Option<windows::Devices::Bluetooth::GenericAttributeProfile::GattSession>,
     level: windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic,
 }
 
-fn links() -> &'static Mutex<HashMap<u64, Link>> {
-    static M: OnceLock<Mutex<HashMap<u64, Link>>> = OnceLock::new();
+impl Drop for Link {
+    fn drop(&mut self) {
+        if let Some(session) = &self.session {
+            let _ = session.SetMaintainConnection(false);
+        }
+    }
+}
+
+// Record the first complete snapshot in which a link was missing. One missed poll
+// after a long sleep must not discard the link immediately.
+const GATT_ABSENCE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+type CachedLinks<T> = HashMap<u64, (T, Option<Instant>)>;
+
+fn prune_absent_links<T>(links: &mut CachedLinks<T>, active: &BTreeSet<u64>, now: Instant) {
+    links.retain(|addr, (_, absent_since)| {
+        if active.contains(addr) {
+            *absent_since = None;
+            true
+        } else {
+            now.duration_since(*absent_since.get_or_insert(now)) < GATT_ABSENCE_GRACE
+        }
+    });
+}
+
+pub(crate) fn retain_gatt_links(active: impl Iterator<Item = u64>) {
+    if let Ok(mut cache) = links().lock()
+        && !cache.is_empty()
+    {
+        prune_absent_links(&mut cache, &active.collect(), Instant::now());
+    }
+}
+
+fn links() -> &'static Mutex<CachedLinks<Link>> {
+    static M: OnceLock<Mutex<CachedLinks<Link>>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
@@ -275,7 +307,7 @@ fn open_link(addr: u64) -> Option<Link> {
     let list = chars.Characteristics().ok()?;
     let level = (list.Size().ok()? > 0).then(|| list.GetAt(0).ok()).flatten()?;
     log(&format!("linked (session kept: {})", session.is_some()));
-    Some(Link { _device: device, _session: session, level })
+    Some(Link { _device: device, session, level })
 }
 
 /// Battery level from the standard Bluetooth LE Battery Service (0x180F, Battery Level 0x2A19)
@@ -284,20 +316,16 @@ fn open_link(addr: u64) -> Option<Link> {
 pub fn read_gatt_battery(addr: u64) -> Option<u8> {
     use windows::Devices::Bluetooth::BluetoothCacheMode;
     use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus;
-    let known = links().lock().ok()?.contains_key(&addr);
-    if !known
-        && let Some(at) = gatt_failed().lock().ok()?.get(&addr)
-        && at.elapsed().as_secs() < GATT_RETRY_SECS
-    {
-        return None;
-    }
     let mut m = links().lock().ok()?;
     #[allow(clippy::map_entry)] // the lock is dropped before the failure is noted
     if !m.contains_key(&addr) {
+        if gatt_failed().lock().ok()?.get(&addr).is_some_and(|at| at.elapsed().as_secs() < GATT_RETRY_SECS) {
+            return None;
+        }
         let link = open_link(addr);
         match link {
             Some(l) => {
-                m.insert(addr, l);
+                m.insert(addr, (l, None));
             }
             None => {
                 drop(m);
@@ -316,7 +344,10 @@ pub fn read_gatt_battery(addr: u64) -> Option<u8> {
         }
         buffer_bytes(&r.Value().ok()?)?.first().copied().filter(|&b| b <= 100)
     };
-    let level = m.get(&addr).and_then(read);
+    let level = m.get_mut(&addr).and_then(|(link, absent_since)| {
+        *absent_since = None;
+        read(link)
+    });
     crate::util::debug_log(|| format!("phone {addr:012X}: level {level:?}"));
     if level.is_none() {
         // Linked before: dropped, opened again at the next read (after a short pause).
@@ -346,6 +377,19 @@ pub fn stop_watcher() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_links_expire_only_after_a_grace_period() {
+        let start = Instant::now();
+        let mut cache = HashMap::from([(1, ((), None)), (2, ((), None))]);
+        prune_absent_links(&mut cache, &BTreeSet::new(), start);
+        assert_eq!(cache.len(), 2);
+        prune_absent_links(&mut cache, &BTreeSet::from([1]), start + GATT_ABSENCE_GRACE);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[&1].1, None);
+        prune_absent_links(&mut cache, &BTreeSet::new(), start + GATT_ABSENCE_GRACE);
+        assert!(cache.contains_key(&1));
+    }
 
     #[test]
     fn fast_pair_battery_field() {

@@ -46,21 +46,29 @@ impl DevSet {
     }
 
     pub fn nodes(&self) -> Vec<DevNode<'_>> {
+        self.nodes_with_status().0
+    }
+
+    /// Partial nodes are still useful for display. Cache eviction requires a complete snapshot.
+    pub(crate) fn nodes_with_status(&self) -> (Vec<DevNode<'_>>, bool) {
+        let mut complete = true;
         let mut out = Vec::new();
         let mut i = 0;
         loop {
             let mut dd = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
-            if unsafe { SetupDiEnumDeviceInfo(self.0, i, &mut dd) }.is_err() {
+            if let Err(err) = unsafe { SetupDiEnumDeviceInfo(self.0, i, &mut dd) } {
+                complete &= err.code() == windows::Win32::Foundation::ERROR_NO_MORE_ITEMS.to_hresult();
                 break;
             }
             i += 1;
             let mut inst = [0u16; 512];
             if unsafe { SetupDiGetDeviceInstanceIdW(self.0, &dd, Some(&mut inst), None) }.is_err() {
+                complete = false;
                 continue;
             }
             out.push(DevNode { set: self, data: dd, instance_id: from_wide(&inst) });
         }
-        out
+        (out, complete)
     }
 }
 

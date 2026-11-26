@@ -112,8 +112,8 @@ pub fn connection_signature() -> u64 {
 pub fn poll(ctx: &mut PollContext) {
     // Only the Bluetooth enumerators: listing every device node on the system (all classes) was the
     // most expensive part of a periodic read.
-    let sets: Vec<DevSet> = ["BTHENUM", "BTHLE", "BTHLEDEVICE"].iter().filter_map(|e| DevSet::present(Some(e))).collect();
-    if sets.is_empty() {
+    let sets = ["BTHENUM", "BTHLE", "BTHLEDEVICE"].map(|e| DevSet::present(Some(e)));
+    if sets.iter().all(Option::is_none) {
         return;
     }
     let mut container_name: BTreeMap<String, String> = BTreeMap::new();
@@ -125,7 +125,15 @@ pub fn poll(ctx: &mut PollContext) {
     let mut container_le: BTreeMap<String, u64> = BTreeMap::new();
     let mut battery: BTreeMap<String, Found> = BTreeMap::new();
 
-    for n in sets.iter().flat_map(|set| set.nodes()) {
+    // Only the classic and LE root nodes supply connection state and phone addresses.
+    let [classic, le, services] = &sets;
+    let mut complete = classic.is_some() && le.is_some();
+    let roots = classic.iter().chain(le).flat_map(|set| {
+        let (nodes, ok) = set.nodes_with_status();
+        complete &= ok;
+        nodes
+    });
+    for n in roots.chain(services.iter().flat_map(DevSet::nodes)) {
         let inst = &n.instance_id;
         if !(inst.starts_with("BTHENUM\\") || inst.starts_with("BTHLE\\") || inst.starts_with("BTHLEDEVICE\\")) {
             continue;
@@ -169,6 +177,13 @@ pub fn poll(ctx: &mut PollContext) {
         battery.insert(cid, Found { pct, name: strip_service_suffix(name), connected: conn });
     }
     drop(sets);
+    if complete {
+        // Missing connection properties are inconclusive. Keep such devices eligible.
+        let active = container_addr.iter().chain(&container_le)
+            .filter(|(cid, _)| container_conn.get(*cid) != Some(&false))
+            .map(|(_, &addr)| addr);
+        ble::retain_gatt_links(active);
+    }
 
     // Physical devices a driver above already reported over a HID interface on the BT link itself.
     let mut reported = BTreeSet::new();

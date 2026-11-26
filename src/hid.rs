@@ -178,6 +178,17 @@ impl Drop for Event {
     }
 }
 
+fn read_matching_report<T>(timeout_ms: u64, mut read: impl FnMut(u32) -> Option<Vec<u8>>, parse: impl Fn(&[u8]) -> Option<T>) -> Option<T> {
+    let end = crate::util::Deadline::in_ms(timeout_ms);
+    while !end.passed() {
+        let frame = read(end.left_ms())?;
+        if let Some(value) = parse(&frame) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 impl HidDev {
     /// Read/write, overlapped.
     pub fn open(c: &HidColl) -> Option<Self> {
@@ -300,13 +311,7 @@ impl HidDev {
         if !self.write(data) {
             return None;
         }
-        let end = crate::util::Deadline::in_ms(timeout_ms);
-        while !end.passed() {
-            if let Some(v) = self.read(end.left_ms()).and_then(|r| parse(&r)) {
-                return Some(v);
-            }
-        }
-        None
+        read_matching_report(timeout_ms, |ms| self.read(ms), parse)
     }
 
     /// Discards queued input reports.
@@ -387,5 +392,20 @@ pub fn kind_from_collections(all: &[HidColl], vid: u16, pid: u16) -> DeviceKind 
         DeviceKind::Keyboard
     } else {
         DeviceKind::Other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_matching_report;
+
+    #[test]
+    fn skips_unrelated_frames_but_stops_on_read_failure() {
+        let mut frames = [Some(vec![0]), Some(vec![7]), None, Some(vec![8])].into_iter();
+        let mut read = |_| frames.next().unwrap();
+        let parse = |frame: &[u8]| frame.first().copied().filter(|&v| v > 0);
+        assert_eq!(read_matching_report(60_000, &mut read, parse), Some(7));
+        assert_eq!(read_matching_report(60_000, &mut read, parse), None);
+        assert_eq!(frames.next(), Some(Some(vec![8])));
     }
 }
