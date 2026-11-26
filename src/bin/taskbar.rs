@@ -1145,12 +1145,28 @@ impl Piece {
 fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
     let n = (d * d).max(0) as usize;
     let (mut base, mut arc) = (vec![0u8; n], vec![0u8; n]);
-    let c = d as f32 / 2.0;
-    let (ro, ri) = (c - 0.5, c - 0.5 - thick);
+    // The icon stays on whole pixels (sharp), placed by its ink (glyphs sit off-centre in their
+    // font cell); the ring, drawn from its formula, is centred on the middle of that ink to a
+    // fraction of a pixel instead.
+    let (mut x0, mut y0, mut x1, mut y1) = (icon.w, icon.h, -1, -1);
+    for yy in 0..icon.h {
+        for xx in 0..icon.w {
+            if icon.a[(yy * icon.w + xx) as usize] > 8 {
+                (x0, y0, x1, y1) = (x0.min(xx), y0.min(yy), x1.max(xx), y1.max(yy));
+            }
+        }
+    }
+    let half = d as f32 / 2.0;
+    let (mx, my) = if x1 >= x0 { ((x0 + x1 + 1) as f32 / 2.0, (y0 + y1 + 1) as f32 / 2.0) } else { (icon.w as f32 / 2.0, icon.h as f32 / 2.0) };
+    let (ox, oy) = ((half - mx).round() as i32, (half - my).round() as i32);
+    let (cx, cy) = (ox as f32 + mx, oy as f32 + my);
+    // Every ring the same size; half a pixel of room for its centre to move.
+    let ro = half - 1.0;
+    let ri = ro - thick;
     let frac = percent.clamp(0, 100) as f32 / 100.0;
     for y in 0..d {
         for x in 0..d {
-            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
             let r = (dx * dx + dy * dy).sqrt();
             let cover = (ro - r + 0.5).clamp(0.0, 1.0) * (r - ri + 0.5).clamp(0.0, 1.0);
             if cover <= 0.0 {
@@ -1169,32 +1185,12 @@ fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
             }
         }
     }
-    // Centred by its ink, not its font box (glyphs sit off-centre in their cell), to a fraction of
-    // a pixel: the icon is resampled at the offset that puts the middle of its ink in the middle
-    // of the ring.
-    let (mut x0, mut y0, mut x1, mut y1) = (icon.w, icon.h, -1, -1);
     for yy in 0..icon.h {
         for xx in 0..icon.w {
-            if icon.a[(yy * icon.w + xx) as usize] > 8 {
-                (x0, y0, x1, y1) = (x0.min(xx), y0.min(yy), x1.max(xx), y1.max(yy));
-            }
-        }
-    }
-    if x1 >= x0 {
-        let (mx, my) = ((x0 + x1 + 1) as f32 / 2.0, (y0 + y1 + 1) as f32 / 2.0);
-        let (ox, oy) = (c - mx, c - my);
-        let at = |x: i32, y: i32| if (0..icon.w).contains(&x) && (0..icon.h).contains(&y) { icon.a[(y * icon.w + x) as usize] as f32 } else { 0.0 };
-        for ty in 0..d {
-            for tx in 0..d {
-                // Bilinear sample of the icon at this ring pixel.
-                let (sx, sy) = (tx as f32 - ox, ty as f32 - oy);
-                let (fx, fy) = (sx.floor(), sy.floor());
-                let (ax, ay) = (sx - fx, sy - fy);
-                let (ix, iy) = (fx as i32, fy as i32);
-                let v = at(ix, iy) * (1.0 - ax) * (1.0 - ay) + at(ix + 1, iy) * ax * (1.0 - ay) + at(ix, iy + 1) * (1.0 - ax) * ay + at(ix + 1, iy + 1) * ax * ay;
+            let (tx, ty) = (ox + xx, oy + yy);
+            if (0..d).contains(&tx) && (0..d).contains(&ty) {
                 let i = (ty * d + tx) as usize;
-                // A little stronger: the small icon's one-pixel strokes looked grey.
-                base[i] = base[i].max((v * 1.4).round().min(255.0) as u8);
+                base[i] = base[i].max(icon.a[(yy * icon.w + xx) as usize]);
             }
         }
     }
