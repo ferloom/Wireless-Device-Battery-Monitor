@@ -218,7 +218,7 @@ Since v1.6 the setup is a Windows 11 style window. It first checks what is on th
 | **Reinstall** | the same version is installed | Writes the program again (repairs a damaged install) |
 | **Go back to ...** | a newer version is installed | Installs this setup's older version, keeping your settings |
 | **Other versions...** | always | Lists every release on GitHub; the chosen one is downloaded, checked against its SHA-256 checksum and installed |
-| **Uninstall...** | installed | Closes BatteryHub, removes it from every autostart location, the shortcuts, files and the Settings → Apps entry. Your settings and battery history **stay** unless you tick *Also remove my settings and battery history* |
+| **Uninstall...** | installed | Closes BatteryHub, removes its own per-user autostart entry, the shortcuts, files and the Settings → Apps entry. Your settings and battery history **stay** unless you tick *Also remove my settings and battery history* |
 
 The new program file is written next to the old one, read back and checked (SHA-256) before it replaces it, so a failed write never leaves a broken install. Only BatteryHub processes started from the install folder are closed. *Show details* shows the log, also saved to `%TEMP%\BatteryHub-Setup.log`.
 

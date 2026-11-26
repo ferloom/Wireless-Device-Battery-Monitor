@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use batteryhub::install::{self as inst, Edition, HKCU, HKLM, Log};
+use batteryhub::install::{self as inst, Edition, HKCU, Log};
 
 // ---- options -----------------------------------------------------------------------------------
 
@@ -403,56 +403,28 @@ pub fn install_release(log: &Log, r: &batteryhub::update::Release, c: &Choices, 
 
 // ---- uninstall ---------------------------------------------------------------------------------
 
-/// Does an autostart entry start BatteryHub? Strict on purpose: the original
-/// C++ BatteryHub ("WirelessBattery" -> BatteryHub.exe) must never match.
-pub fn starts_edition(ed: &Edition, dir: &Path, name: &str, command: &str) -> bool {
-    let c = command.to_lowercase();
-    let d = dir.display().to_string().to_lowercase();
-    ed.run_value.is_some_and(|v| name.eq_ignore_ascii_case(v)) || c.contains(&ed.exe.to_lowercase()) || (!d.is_empty() && c.contains(&d))
+/// Setup and the taskbar write one named HKCU Run value containing the quoted executable.
+fn owned_run_command(command: &str, exe: &Path) -> bool {
+    let command = command.trim();
+    let target = command.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(command);
+    inst::same_path(Path::new(target), exe)
 }
 
-fn scan_autostart(ed: &Edition, log: &Log, dir: &Path, removed: &mut Vec<String>) -> Vec<String> {
-    let mut errors = Vec::new();
-    for (hive, path) in [(HKCU, inst::RUN_KEY), (HKCU, inst::RUN_ONCE_KEY), (HKLM, inst::RUN_KEY)] {
-        let where_ = format!("{}\\{path}", inst::hive_name(hive));
-        let Some(key) = inst::open(hive, path, false) else { continue };
-        for (name, _, data) in key.values() {
-            if !starts_edition(ed, dir, &name, &data) {
-                continue;
-            }
-            match inst::open(hive, path, true) {
-                Some(w) if w.delete_value(&name) => {
-                    log.ok(format!("Removed \"{name}\" from {where_}"));
-                    removed.push(format!("autostart {where_}\\{name}"));
-                }
-                _ => {
-                    let e = format!("Cannot remove \"{name}\" from {where_}{}", if hive == HKLM { " (needs administrator rights)" } else { "" });
-                    log.error(&e);
-                    errors.push(e);
-                }
-            }
-        }
+fn remove_autostart(ed: &Edition, exe: &Path, log: &Log, removed: &mut Vec<String>) -> Result<(), String> {
+    let Some(name) = ed.run_value else { return Ok(()) };
+    let Some(command) = inst::open(HKCU, inst::RUN_KEY, false).and_then(|k| k.get(name)) else { return Ok(()) };
+    if !owned_run_command(&command, exe) {
+        return Ok(());
     }
-    if let Some(v) = ed.run_value
-        && inst::open(HKCU, inst::STARTUP_APPROVED_KEY, true).is_some_and(|k| k.delete_value(v))
-    {
-        removed.push(format!("autostart HKCU\\{}\\{v}", inst::STARTUP_APPROVED_KEY));
+    if !inst::open(HKCU, inst::RUN_KEY, true).is_some_and(|k| k.delete_value(name)) {
+        return Err(format!("Could not remove HKCU\\{}\\{name}", inst::RUN_KEY));
     }
-    let startup = inst::startup_dir();
-    if let Ok(entries) = std::fs::read_dir(&startup) {
-        for e in entries.flatten() {
-            let bytes = std::fs::read(e.path()).unwrap_or_default();
-            let wide: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-            let text = String::from_utf16_lossy(&wide) + &String::from_utf8_lossy(&bytes);
-            if starts_edition(ed, dir, "", &text) {
-                match std::fs::remove_file(e.path()) {
-                    Ok(_) => removed.push(format!("shortcut  {}", e.path().display())),
-                    Err(err) => errors.push(format!("Could not delete {}: {err}", e.path().display())),
-                }
-            }
-        }
+    log.ok(format!("Removed autostart entry {name}"));
+    removed.push(format!("autostart HKCU\\{}\\{name}", inst::RUN_KEY));
+    if inst::open(HKCU, inst::STARTUP_APPROVED_KEY, true).is_some_and(|k| k.delete_value(name)) {
+        removed.push(format!("autostart HKCU\\{}\\{name}", inst::STARTUP_APPROVED_KEY));
     }
-    errors
+    Ok(())
 }
 
 fn remove_file(log: &Log, p: &Path, removed: &mut Vec<String>, label: &str) -> Result<(), String> {
@@ -512,6 +484,10 @@ fn unregister_app(ed: &Edition, log: &Log, dir: &Path, removed: &mut Vec<String>
 /// Install information in the settings key: removed on uninstall even when the settings stay.
 const INSTALL_VALUES: [&str; 4] = ["InstallLocation", "Version", "InstalledOn", "UpdatedFrom"];
 
+fn owns_legacy_installation(ed: &Edition) -> bool {
+    ed.settings_key == inst::TASKBAR.settings_key
+}
+
 /// Leftovers of the pre-release "BatteryHub 2" test builds (taskbar edition only).
 fn remove_legacy(log: &Log, removed: &mut Vec<String>) {
     if inst::open(HKCU, inst::RUN_KEY, true).is_some_and(|r| r.delete_value("BatteryHub2")) {
@@ -554,7 +530,9 @@ pub fn uninstall(ed: &Edition, log: &Log, st: &State, purge: bool, progress: Pro
     }
 
     progress(0.25, "Removing autostart entries");
-    errors.extend(scan_autostart(ed, log, &st.dir, &mut removed));
+    if let Err(e) = remove_autostart(ed, &st.exe, log, &mut removed) {
+        errors.push(e);
+    }
 
     progress(0.4, "Removing shortcuts");
     for lnk in [ed.desktop_shortcut(), ed.start_menu_shortcut()] {
@@ -606,7 +584,7 @@ pub fn uninstall(ed: &Edition, log: &Log, st: &State, purge: bool, progress: Pro
     }
 
     progress(0.9, "Cleaning up");
-    if ed.run_value.is_some() {
+    if owns_legacy_installation(ed) {
         remove_legacy(log, &mut removed);
     }
     progress(1.0, "Done");
@@ -647,14 +625,19 @@ mod tests {
 
     #[test]
     fn autostart_matching_is_strict() {
-        let t = inst::TASKBAR;
-        let dir = t.default_dir();
-        assert!(starts_edition(&t, &dir, "BatteryHub Taskbar", "\"x.exe\""));
-        assert!(starts_edition(&t, &dir, "x", &format!("\"{}\"", dir.join(t.exe).display())));
-        assert!(starts_edition(&t, &dir, "x", r#""D:\Tools\batteryhub-taskbar.exe""#));
-        // The original C++ app and unrelated programs never match.
-        assert!(!starts_edition(&t, &dir, "WirelessBattery", r#""C:\Program Files\BatteryHub\BatteryHub.exe""#));
-        assert!(!starts_edition(&t, &dir, "LGHUB", r#""C:\Program Files\LGHUB\lghub_system_tray.exe" --minimized"#));
+        let exe = Path::new(r"C:\Apps\BatteryHub Taskbar\batteryhub-taskbar.exe");
+        assert!(owned_run_command(&format!("\"{}\"", exe.display()), exe));
+        assert!(owned_run_command(&exe.display().to_string(), exe));
+        assert!(!owned_run_command(&format!("backup.exe --source \"{}\"", exe.display()), exe));
+        assert!(!owned_run_command(r"D:\Other\batteryhub-taskbar.exe", exe));
+        assert!(!owned_run_command(r"C:\Apps\BatteryHub Taskbar\backup.exe", exe));
+    }
+
+    #[test]
+    fn only_taskbar_owns_the_legacy_installation() {
+        let other = Edition { settings_key: r"Software\BatteryHub\SetupTest", ..inst::TASKBAR };
+        assert!(owns_legacy_installation(&inst::TASKBAR));
+        assert!(!owns_legacy_installation(&other));
     }
 
     #[test]
