@@ -1,7 +1,7 @@
 //! The "Request support for a device" window (see report.rs for what goes into the request).
 //!
-//! Runs on the UI thread of the program; the device scan runs on a worker thread. *Send* opens the
-//! filled-in "new issue" form on GitHub in the browser, and the user submits it there.
+//! Runs on the UI thread of the program; the device scan runs on a worker thread. *Send* copies the
+//! request and opens the device-requests channel on Discord, where the user pastes it.
 use std::cell::RefCell;
 use std::ffi::c_void;
 
@@ -233,8 +233,8 @@ fn create_controls() {
     let tab = WS_TABSTOP.0;
     add(
         w!("STATIC"),
-        "Is one of your devices not shown? Pick it below. Send opens a new issue on the project's GitHub page, \
-         filled in with what is shown here; you check it and submit it there (a GitHub account is needed).",
+        "Is one of your devices not shown? Pick it below. Send copies what is shown here and opens the \
+         device-requests channel on BatteryHub's Discord: paste it there and send it.",
         0,
         -1,
         L,
@@ -257,13 +257,13 @@ fn create_controls() {
         send(ty, CB_ADDSTRING, 0, HSTRING::from(t).as_ptr() as isize);
     }
     send(ty, CB_SETCURSEL, TYPES.len() - 1, 0);
-    add(w!("STATIC"), "Your name (optional, shown in the GitHub issue)", 0, -1, L, 216, W, 18, none);
+    add(w!("STATIC"), "Your name (optional, shown in the request)", 0, -1, L, 216, W, 18, none);
     let name = add(w!("EDIT"), "", ES_AUTOHSCROLL | tab, IDC_NAME, L, 234, W, 24, edge);
     send(name, EM_LIMITTEXT, NAME_MAX, 0);
     add(w!("STATIC"), "Anything else we should know? (optional)", 0, -1, L, 266, W, 18, none);
     let notes = add(w!("EDIT"), "", ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL.0 | tab, IDC_NOTES, L, 284, W, 54, edge);
     send(notes, EM_LIMITTEXT, NOTES_MAX, 0);
-    add(w!("STATIC"), "This is exactly what the GitHub issue will contain:", 0, -1, L, 346, W, 18, none);
+    add(w!("STATIC"), "This is exactly what will be copied for Discord:", 0, -1, L, 346, W, 18, none);
     add(w!("EDIT"), "", ES_MULTILINE | ES_READONLY | WS_VSCROLL.0 | tab, IDC_PREVIEW, L, 364, W, 132, edge);
     add(w!("STATIC"), "Scanning your devices...", 0, IDC_STATUS, L, 502, W, 44, none);
     add(w!("BUTTON"), "Copy full report", tab, IDC_COPY, L, 550, 180, 28, none);
@@ -464,28 +464,26 @@ extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     IDC_MODEL | IDC_NAME | IDC_NOTES if code == EN_CHANGE => update_preview(),
                     IDC_SEND | 1 /* IDOK: Enter */ => {
                         if IsWindowEnabled(item(IDC_SEND)).as_bool() {
+                            // Requests go to the device-requests channel on Discord: the request is
+                            // copied, the channel opened, and the user pastes it there.
                             let (title, body) = issue();
-                            let url = report::issue_url(&title, &body);
-                            let r = ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
-                            if r.0 as isize > 32 {
-                                set_text(
-                                    IDC_STATUS,
-                                    "GitHub opened in your browser with the request filled in. Check it and click Create to \
-                                     submit it. Thank you!",
-                                );
-                            } else {
-                                let ok = copy_to_clipboard(h, &format!("{title}\n\n{body}"));
-                                set_text(
-                                    IDC_STATUS,
-                                    if ok {
-                                        "Couldn't open the browser. The request is copied: paste it into a new issue at \
-                                         github.com/ferloom/Wireless-Device-Battery-Monitor/issues."
-                                    } else {
-                                        "Couldn't open the browser. Please open a new issue at \
-                                         github.com/ferloom/Wireless-Device-Battery-Monitor/issues."
-                                    },
-                                );
-                            }
+                            let copied = copy_to_clipboard(h, &report::discord_message(&title, &body));
+                            let r = ShellExecuteW(None, w!("open"), &HSTRING::from(report::REQUESTS_CHANNEL), None, None, SW_SHOWNORMAL);
+                            let opened = r.0 as isize > 32;
+                            set_text(
+                                IDC_STATUS,
+                                match (copied, opened) {
+                                    (true, true) => {
+                                        "Copied! The device-requests channel on Discord is opening: paste the request there \
+                                         (Ctrl+V) and send it. Not on the server yet? Join at discord.gg/hAbyqpT3EA. Thank you!"
+                                    }
+                                    (true, false) => {
+                                        "Copied! Open discord.gg/hAbyqpT3EA, go to the device-requests channel and paste the \
+                                         request there (Ctrl+V). Thank you!"
+                                    }
+                                    _ => "Couldn't copy the request. Please try again.",
+                                },
+                            );
                         }
                     }
                     IDC_COPY => {
@@ -496,8 +494,8 @@ extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         set_text(
                             IDC_STATUS,
                             if done {
-                                "The full report (with every device BatteryHub sees) is copied. Paste it into the GitHub \
-                                 issue if we ask for more details."
+                                "The full report (with every device BatteryHub sees) is copied. Paste it on Discord if \
+                                 we ask for more details."
                             } else {
                                 "Couldn't copy to the clipboard. Please try again."
                             },

@@ -90,6 +90,8 @@ const POP_MS: f32 = 260.0;
 const STAGGER_MS: u64 = 70;
 /// Key of the "no devices found" glyph on the strip.
 const NONE_KEY: &str = "\u{0}none";
+/// "Rising level means charging": a phone whose level stays the same this long is not charging.
+const RISE_FLAT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// The refresh glyph's item while a refresh started from the menu runs.
 const REFRESH_KEY: &str = "\u{0}refresh";
 
@@ -418,8 +420,9 @@ struct App {
     rooms: RefCell<HashMap<isize, bool>>,
     /// No taskbar the widget is shown on has room: the levels are notification-area icons.
     crowded: bool,
-    /// Phones with "Rising level means charging": (last level, charging as worked out).
-    rising: HashMap<String, (i32, bool)>,
+    /// Phones with "Rising level means charging": (last level, charging as worked out, when the
+    /// level last changed).
+    rising: HashMap<String, (i32, bool, Instant)>,
     /// When "not enough room" was last said (once per crowding, at most every 10 minutes).
     crowded_said: Option<Instant>,
     /// "SHELLHOOK" message: windows opening and closing.
@@ -3672,17 +3675,23 @@ impl App {
 
     /// Phones with "Rising level means charging" (experimental): a level above the last one marks
     /// the phone as charging until a level below the last one (e.g. 15 % saved, then 21 %:
-    /// charging, until 82 % is followed by 81 %). The first level compared is the last one saved.
+    /// charging, until 82 % is followed by 81 %). A level that stays the same keeps it charging
+    /// (Windows may just not report a new level), but not for longer than RISE_FLAT. The first
+    /// level compared is the last one saved.
     fn infer_charging(&mut self, fresh: &mut [DeviceStatus]) {
         for s in fresh.iter_mut() {
             if s.kind != DeviceKind::Phone || s.percent < 0 || !s.connected || !settings::rise_charging(SETTINGS_KEY, &s.key) {
                 continue;
             }
             let saved = self.history.latest(&s.key).map(|p| p.level as i32);
-            let st = self.rising.entry(s.key.clone()).or_insert((saved.unwrap_or(s.percent), false));
+            let st = self.rising.entry(s.key.clone()).or_insert((saved.unwrap_or(s.percent), false, Instant::now()));
             if s.percent > st.0 {
                 st.1 = true;
+                st.2 = Instant::now();
             } else if s.percent < st.0 {
+                st.1 = false;
+                st.2 = Instant::now();
+            } else if st.2.elapsed() >= RISE_FLAT {
                 st.1 = false;
             }
             st.0 = s.percent;

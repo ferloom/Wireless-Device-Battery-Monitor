@@ -1,8 +1,13 @@
-# Closes issues labelled "awaiting-confirmation" 24 hours after the label was added, unless someone
-# other than the maintainer replied since then. A reply removes the label, so the issue stays open.
+# Issues waiting for the reporter are labelled "awaiting-confirmation" instead of being closed.
+# - A comment from anyone but the maintainer removes the label at once, and reopens the issue if it
+#   was closed.
+# - 24 hours after the label was added with no such reply, the issue is closed: as "not planned"
+#   when it is also labelled "unsupported" or "duplicate", else as "completed".
 name: Close unanswered issues
 
 on:
+  issue_comment:
+    types: [created]
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
@@ -11,7 +16,33 @@ permissions:
   issues: write
 
 jobs:
+  reply:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request &&
+      github.event.comment.user.login != github.repository_owner &&
+      github.event.comment.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove the label, reopen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number }}
+          STATE: ${{ github.event.issue.state }}
+          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+        run: |
+          if [[ ",$LABELS," == *",awaiting-confirmation,"* ]]; then
+            gh issue edit "$N" --repo "$REPO" --remove-label awaiting-confirmation
+            echo "#$N: label removed"
+          fi
+          if [ "$STATE" = "closed" ]; then
+            gh issue reopen "$N" --repo "$REPO"
+            echo "#$N: reopened"
+          fi
+
   close:
+    if: github.event_name != 'issue_comment'
     runs-on: ubuntu-latest
     steps:
       - name: Close or keep labelled issues
@@ -36,8 +67,12 @@ jobs:
             fi
             age=$(( now - $(date -u -d "$labelled" +%s) ))
             if [ "$age" -ge 86400 ]; then
-              gh issue close "$n" --repo "$REPO" --reason completed \
-                --comment "Closing automatically: no reply within 24 hours. If something still doesn't work, comment here or open a new issue."
-              echo "#$n: closed"
+              reason=completed
+              if gh issue view "$n" --repo "$REPO" --json labels -q '.labels[].name' | grep -qx 'unsupported\|duplicate'; then
+                reason="not planned"
+              fi
+              gh issue close "$n" --repo "$REPO" --reason "$reason" \
+                --comment "Closing automatically: no reply within 24 hours. If something still doesn't work, just comment here and it reopens."
+              echo "#$n: closed ($reason)"
             fi
           done

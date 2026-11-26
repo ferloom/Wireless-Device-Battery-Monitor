@@ -1,8 +1,8 @@
 //! "Request support for a device": the device list and the text of the request.
 //!
-//! The window (report_window.rs) lets the user pick a device that is not shown, and *Send* opens a
-//! new GitHub issue on the project, filled in with what is shown in the window. Nothing is sent from
-//! the app itself: the user checks the issue in the browser and submits it there.
+//! The window (report_window.rs) lets the user pick a device that is not shown, and *Send* copies
+//! what is shown in the window and opens the device-requests channel on Discord. Nothing is sent
+//! from the app itself: the user pastes the request there and sends it.
 //!
 //! Privacy: the request holds the device name, its type, the user's own notes and a short technical
 //! summary (vendor / product id, HID usage pages and report sizes, USB interface classes, the Windows
@@ -314,6 +314,22 @@ pub fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Discord channel where device requests are posted (the app copies the request, the user pastes it).
+pub const REQUESTS_CHANNEL: &str = "https://discord.com/channels/1575224612567122022/1575518273066373140";
+
+/// The request as one Discord message: the title in bold, then the body. Discord takes at most
+/// 2000 characters, so a longer one is cut at a line end (the HID list is the long part).
+pub fn discord_message(title: &str, body: &str) -> String {
+    const MAX: usize = 1990;
+    let mut s = format!("**{title}**\n{body}");
+    if s.chars().count() > MAX {
+        let cut: String = s.chars().take(MAX - 2).collect();
+        let end = cut.rfind('\n').unwrap_or(cut.len());
+        s = format!("{}\n…", &cut[..end]);
+    }
+    s
 }
 
 /// Link to GitHub's "new issue" form, filled in.
