@@ -136,6 +136,7 @@ impl Presence {
 }
 
 /// One item on the strip this frame.
+#[derive(Clone)]
 struct Item {
     key: String,
     /// The device (None for the "no devices found" glyph).
@@ -212,6 +213,22 @@ const ID_SIDE_RIGHT: usize = 98;
 const ID_SIDE_LEFT: usize = 99;
 /// "Widget position: next to the icons": right after the task buttons, wherever they are.
 const ID_SIDE_ICONS: usize = 118;
+/// "Widget position: Before the icons" (centred taskbar icons only).
+const ID_SIDE_BEFORE: usize = 119;
+/// "Position on the taskbar: Change position": the widget follows the mouse until a click.
+const ID_POSITION_MOVE: usize = 211;
+/// "Mirror other widgets": every taskbar's widget alike, or each with its own place and order.
+const ID_MIRRORING: usize = 212;
+/// "Lock device positions": no dragging or moving the devices on the strip.
+const ID_LOCK_ORDER: usize = 213;
+
+/// Widget positions (registry WidgetLeft): next to the clock, at the left end, right after the
+/// taskbar icons, right before them (centred icons), or where it was put with the mouse.
+const SIDE_RIGHT: u32 = 0;
+const SIDE_LEFT: u32 = 1;
+const SIDE_ICONS: u32 = 2;
+const SIDE_BEFORE: u32 = 3;
+const SIDE_FREE: u32 = 4;
 /// "Help": the GitHub page and ID_HELP_RELEASE_FIRST + i for the latest releases.
 const ID_HELP_GITHUB: usize = 200;
 const ID_HELP_RELEASE_FIRST: usize = 201;
@@ -345,6 +362,19 @@ struct App {
     fonts_more: Vec<Fonts>,
     /// Strip the device being dragged belongs to.
     drag_on: HWND,
+    /// Widget position (SIDE_*) and, for SIDE_FREE, its left edge (px at 100 %, from the
+    /// taskbar's left end).
+    side: u32,
+    free_x: i32,
+    /// "Mirror other widgets" (default on): every taskbar's widget has the main one's place and
+    /// order. Off: each has its own (App.views[..].lay).
+    mirroring: bool,
+    /// "Lock device positions": the devices can't be dragged or moved.
+    lock_order: bool,
+    /// "Change position" running: (strip, where the mouse holds it, its layout before).
+    moving: Option<(HWND, i32, Layout)>,
+    /// Strip the right-click menu was opened on (its widget's settings are the ones changed).
+    menu_on: HWND,
     last_place: (RECT, RECT, i32),
     /// Main strip uses a topmost popup owned by `Shell_TrayWnd` (e.g. when Start11's SDTaskbar
     /// sits inside `Shell_TrayWnd` and fights child-window Z-order).
@@ -511,6 +541,55 @@ struct View {
     /// DPI scale and orientation it was rendered for.
     scale: f32,
     vertical: bool,
+    /// Its own place and order ("Mirror other widgets" off); None: the main widget's.
+    lay: Option<Layout>,
+}
+
+/// Where a widget sits on its taskbar and in which order it shows the devices.
+#[derive(Clone, Default, PartialEq)]
+struct Layout {
+    side: u32,
+    /// Gap left of the notification area (px at 100 %), with SIDE_RIGHT.
+    offset: u32,
+    /// Up / down shift (px at 100 %, + = down).
+    offset_y: i32,
+    /// SIDE_FREE: left edge (px at 100 %) from the taskbar's left end.
+    free_x: i32,
+    /// Saved device order.
+    order: Vec<String>,
+}
+
+/// Registry key of the widget on the monitor of taskbar `bar` (its own layout).
+fn widget_key(bar: HWND) -> String {
+    format!("{SETTINGS_KEY}\\Widgets\\{}", monitor_id(bar).replace(['\\', '/'], "#"))
+}
+
+/// The own layout saved for the widget on `bar`'s monitor, if there is one.
+fn load_layout(bar: HWND) -> Option<Layout> {
+    let key = widget_key(bar);
+    let side = batteryhub::util::reg_get_dword(&key, "WidgetLeft")?;
+    Some(Layout {
+        side,
+        offset: batteryhub::util::reg_get_dword(&key, "TaskbarOffset").unwrap_or(0),
+        offset_y: batteryhub::util::reg_get_dword(&key, "TaskbarOffsetY").unwrap_or(0) as i32,
+        free_x: batteryhub::util::reg_get_dword(&key, "WidgetFreeX").unwrap_or(0) as i32,
+        order: settings::order(&key),
+    })
+}
+
+fn save_layout(key: &str, lay: &Layout) {
+    if let Some(k) = batteryhub::install::create(batteryhub::install::HKCU, key) {
+        k.set_dword("WidgetLeft", lay.side);
+        k.set_dword("TaskbarOffset", lay.offset);
+        k.set_dword("TaskbarOffsetY", lay.offset_y as u32);
+        k.set_dword("WidgetFreeX", lay.free_x as u32);
+    }
+}
+
+/// Windows 11 taskbar icons are centred (Settings > Personalization > Taskbar > Taskbar
+/// behaviors > Taskbar alignment; centred unless set to left).
+fn taskbar_centred() -> bool {
+    batteryhub::util::reg_get_dword(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarAl").is_none_or(|v| v != 0)
 }
 
 /// What a widget is rendered for: its taskbar's DPI scale, orientation, and height (horizontal)
@@ -520,6 +599,8 @@ struct Target {
     s: f32,
     vertical: bool,
     extent: i32,
+    /// Up / down shift drawn now (px at 100 %).
+    shift_y: f32,
 }
 
 /// The render `px` on the taskbar's hover plate: a rounded, slightly lighter (dark taskbar) or
@@ -1146,10 +1227,26 @@ impl App {
         let mut grown = Vec::new();
         for (bar, strip) in copies {
             let key = strip.0 as isize;
+            let own = self.own_layout(strip);
             let mut v = self.views.remove(&key).unwrap_or_default();
             let before = v.size;
-            let target = self.bar_target(bar);
-            self.render(&mut v, &items, target, strip);
+            let mut target = self.bar_target(bar);
+            if own {
+                // Its own place and order ("Mirror other widgets" off).
+                if v.lay.is_none() {
+                    v.lay = Some(load_layout(bar).unwrap_or_else(|| self.main_layout()));
+                }
+                let lay = v.lay.clone().unwrap_or_default();
+                target.shift_y = lay.offset_y as f32;
+                let mut order = self.order.clone();
+                settings::apply_order(&mut order, &lay.order);
+                let mut list = items.clone();
+                list.sort_by_key(|it| order.iter().position(|k| *k == it.key).unwrap_or(usize::MAX));
+                self.render(&mut v, &list, target, strip);
+            } else {
+                v.lay = None;
+                self.render(&mut v, &items, target, strip);
+            }
             let resized = before != v.size;
             self.views.insert(key, v);
             // A new size: its placement below gives it the image together with its new place.
@@ -1184,7 +1281,7 @@ impl App {
         }
         let (w, h) = (c.right - c.left, c.bottom - c.top);
         let vertical = if bar == self.taskbar { self.vertical } else { h > w };
-        Target { s, vertical, extent: if vertical { w } else { h } }
+        Target { s, vertical, extent: if vertical { w } else { h }, shift_y: self.shown_offset_y() }
     }
 
     /// The fonts of the strip (icons, bolt, text) for DPI scale `s`.
@@ -1291,7 +1388,7 @@ impl App {
             let w = t.extent.clamp((32.0 * t.s).round() as i32, (160.0 * t.s).round() as i32);
             self.render_column(v, &pieces, items, w, t.s, drag_here);
         } else {
-            self.render_row(v, &pieces, items, t.extent, t.s, drag_here);
+            self.render_row(v, &pieces, items, t.extent, t.s, t.shift_y, drag_here);
         }
         v.scale = t.s;
         v.vertical = t.vertical;
@@ -1299,7 +1396,8 @@ impl App {
     }
 
     /// Horizontal taskbar: the devices side by side, `bar_h` high.
-    fn render_row(&mut self, v: &mut View, pieces: &[Piece], items: &[Item], bar_h: i32, s: f32, drag_here: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn render_row(&mut self, v: &mut View, pieces: &[Piece], items: &[Item], bar_h: i32, s: f32, shift_y: f32, drag_here: bool) {
         let px = |x: f32| (x * s).round() as i32;
         let light = self.light;
         let h = bar_h.clamp(px(24.0), px(64.0));
@@ -1370,7 +1468,6 @@ impl App {
         }
         let keys: Vec<String> = items.iter().map(|it| it.key.clone()).collect();
         let moves = self.motion(v, &keys, &ranges, w, s, drag_here);
-        let shift_y = self.shown_offset_y();
         // The dragged device last, over the others.
         let held = |p: &Piece| p.dev.is_some_and(|i| moves[i].2 < 255);
         for pass in [false, true] {
@@ -1487,6 +1584,175 @@ impl App {
     /// Whether `strip` is drawn for a vertical taskbar.
     fn strip_vertical(&self, strip: HWND) -> bool {
         self.view(strip).map_or(self.vertical, |v| v.vertical)
+    }
+
+    /// The main widget's place and order (every widget's with "Mirror other widgets" on).
+    fn main_layout(&self) -> Layout {
+        Layout { side: self.side, offset: self.offset, offset_y: self.offset_y, free_x: self.free_x, order: self.saved_order.clone() }
+    }
+
+    /// `strip` is a copy with its own place and order ("Mirror other widgets" off).
+    fn own_layout(&self, strip: HWND) -> bool {
+        !self.mirroring && strip != self.strip && self.mirrors.iter().chain(self.parked.iter()).any(|m| m.1 == strip)
+    }
+
+    /// Place and order of the widget in `strip`.
+    fn layout_of(&self, strip: HWND) -> Layout {
+        if self.own_layout(strip)
+            && let Some(lay) = self.view(strip).and_then(|v| v.lay.clone())
+        {
+            return lay;
+        }
+        if self.own_layout(strip) {
+            return load_layout(self.bar_of(strip)).unwrap_or_else(|| self.main_layout());
+        }
+        self.main_layout()
+    }
+
+    /// Taskbar of `strip` (the main one for the main strip or an unknown window).
+    fn bar_of(&self, strip: HWND) -> HWND {
+        self.mirrors.iter().chain(self.parked.iter()).find(|m| m.1 == strip).map_or(self.taskbar, |m| m.0)
+    }
+
+    /// Changes the place and order of the widget in `strip` (every widget's while they mirror the
+    /// main one), saved when `save`, and moves the widgets there.
+    fn change_layout(&mut self, strip: HWND, save: bool, f: impl FnOnce(&mut Layout)) {
+        let before = self.layout_of(strip);
+        let mut lay = before.clone();
+        f(&mut lay);
+        if self.own_layout(strip) {
+            let bar = self.bar_of(strip);
+            if save {
+                save_layout(&widget_key(bar), &lay);
+                settings::set_order(&widget_key(bar), &lay.order);
+            }
+            let reorder = lay.order != before.order;
+            if let Some(v) = self.view_mut(strip) {
+                v.lay = Some(lay.clone());
+                v.reordered |= reorder;
+            }
+        } else {
+            if save {
+                save_dword("WidgetLeft", lay.side);
+                save_dword("WidgetFreeX", lay.free_x as u32);
+                for (name, v) in [("TaskbarOffset", lay.offset), ("TaskbarOffsetY", lay.offset_y as u32)] {
+                    if v == 0 {
+                        batteryhub::util::reg_delete_value(SETTINGS_KEY, name);
+                    } else {
+                        save_dword(name, v);
+                    }
+                }
+            }
+            if lay.offset_y != self.offset_y {
+                self.y_glide = Some((self.shown_offset_y(), Instant::now()));
+                unsafe {
+                    SetTimer(Some(self.main), TIMER_GLIDE, 15, None);
+                }
+            }
+            self.side = lay.side;
+            self.align_left = lay.side != SIDE_RIGHT;
+            self.after_icons = lay.side == SIDE_ICONS;
+            self.offset = lay.offset;
+            self.offset_y = lay.offset_y;
+            self.free_x = lay.free_x;
+        }
+        if lay.side != before.side {
+            // A new place: the taskbar's items are checked again at once (not a minute-old answer).
+            batteryhub::tray_probe::left_refresh_soon();
+        }
+        self.last_place = Default::default();
+        self.paint();
+        self.place();
+        self.sync_mirrors();
+    }
+
+    /// "Change position": the widget in `strip` follows the mouse along its taskbar until a click.
+    fn begin_move(&mut self, strip: HWND) {
+        let strip = if self.view(strip).is_some() { strip } else { self.strip };
+        if strip.0.is_null() || self.strip_vertical(strip) {
+            return;
+        }
+        let before = self.layout_of(strip);
+        let (mut rc, mut pt) = (RECT::default(), POINT::default());
+        unsafe {
+            let _ = GetWindowRect(strip, &mut rc);
+            let _ = GetCursorPos(&mut pt);
+        }
+        // Held where the mouse is on it, or by its middle (the menu was elsewhere).
+        let grab = if pt.x >= rc.left && pt.x < rc.right { pt.x - rc.left } else { (rc.right - rc.left) / 2 };
+        self.moving = Some((strip, grab, before));
+        self.hide_tip();
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(strip);
+        }
+        self.move_step();
+    }
+
+    /// While moving: the widget's left edge follows the mouse (within its taskbar).
+    fn move_step(&mut self) {
+        let Some((strip, grab, _)) = self.moving.clone() else { return };
+        let bar = self.bar_of(strip);
+        let s = self.view(strip).map_or(1.0, |v| v.scale);
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let mut p = POINT { x: pt.x - grab, y: pt.y };
+        unsafe {
+            let _ = ScreenToClient(bar, &mut p);
+        }
+        let x = (p.x.max(0) as f32 / s).round() as i32;
+        if self.layout_of(strip).side == SIDE_FREE && self.layout_of(strip).free_x == x {
+            return;
+        }
+        self.change_layout(strip, false, |l| {
+            l.side = SIDE_FREE;
+            l.free_x = x;
+        });
+    }
+
+    /// A click ends "Change position": the place is kept (`keep`) or the old one restored.
+    fn end_move(&mut self, keep: bool) {
+        let Some((strip, _, before)) = self.moving.take() else { return };
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        }
+        let now = self.layout_of(strip);
+        self.change_layout(strip, true, |l| *l = if keep { now } else { before });
+    }
+
+    /// Left edge (client x of `bar`) of a widget `w` wide on the horizontal taskbar `bar` (screen
+    /// rectangle `br`, notification area from screen x `right`) with layout `lay`. None while
+    /// the taskbar's items are not known yet (WM_TRAY_PROBED places it once they are).
+    #[allow(clippy::too_many_arguments)]
+    fn widget_left(&self, bar: HWND, br: RECT, right: i32, w: i32, s: f32, lay: &Layout) -> Option<i32> {
+        let to_client = |x: i32| {
+            let mut p = POINT { x, y: br.top };
+            unsafe {
+                let _ = ScreenToClient(bar, &mut p);
+            }
+            p.x
+        };
+        let gap = (6.0 * s) as i32;
+        // Before the icons needs centred icons: at the left end otherwise.
+        let side = if lay.side == SIDE_BEFORE && !taskbar_centred() { SIDE_LEFT } else { lay.side };
+        let exclude = || screen_spans(bar, &foreign_widgets(bar));
+        use batteryhub::tray_probe as tp;
+        Some(match side {
+            SIDE_LEFT => to_client(tp::left_content_end(bar, br, self.main, WM_TRAY_PROBED)?) + gap,
+            SIDE_ICONS => to_client(tp::icons_end(bar, br, right, &exclude(), self.main, WM_TRAY_PROBED)?) + gap,
+            SIDE_BEFORE => (to_client(tp::icons_start(bar, br, right, &exclude(), self.main, WM_TRAY_PROBED)?) - w - gap).max(0),
+            SIDE_FREE => ((lay.free_x as f32 * s).round() as i32).clamp(0, (to_client(right) - w - (2.0 * s) as i32).max(0)),
+            _ => {
+                let mut left = to_client(right) - w - (2.0 * s) as i32;
+                // Optional extra gap (DPI-independent px), e.g. to sit next to another taskbar widget.
+                if lay.offset > 0 {
+                    left -= (lay.offset as f32 * s) as i32;
+                }
+                // Other programs' widgets in the taskbar: sit left of them instead of on top.
+                avoid_widgets(bar, left, w, (4.0 * s) as i32)
+            }
+        })
     }
 
     /// Some widget has a device sliding to a new place.
@@ -2085,8 +2351,9 @@ impl App {
                 let mut p = POINT { x: br.left, y: bottom };
                 let _ = ScreenToClient(bar, &mut p);
                 let mut top = p.y - size.cy - (2.0 * s) as i32;
-                if self.offset > 0 {
-                    top -= (self.offset as f32 * s) as i32;
+                let gap = self.layout_of(strip).offset;
+                if gap > 0 {
+                    top -= (gap as f32 * s) as i32;
                 }
                 let mut client = RECT::default();
                 let _ = GetClientRect(bar, &mut client);
@@ -2111,26 +2378,8 @@ impl App {
                     batteryhub::tray_probe::TrayEdge::Unknown => br.right - (130.0 * s) as i32,
                 },
             };
-            let left = if self.align_left {
-                let found = if self.after_icons {
-                    let exclude = screen_spans(bar, &foreign_widgets(bar));
-                    batteryhub::tray_probe::icons_end(bar, br, right, &exclude, self.main, WM_TRAY_PROBED)
-                } else {
-                    batteryhub::tray_probe::left_content_end(bar, br, self.main, WM_TRAY_PROBED)
-                };
-                let Some(x) = found else { return true };
-                let mut p = POINT { x, y: br.top };
-                let _ = ScreenToClient(bar, &mut p);
-                p.x + (6.0 * s) as i32
-            } else {
-                let mut p = POINT { x: right, y: br.top };
-                let _ = ScreenToClient(bar, &mut p);
-                let mut left = p.x - size.cx - (2.0 * s) as i32;
-                if self.offset > 0 {
-                    left -= (self.offset as f32 * s) as i32;
-                }
-                avoid_widgets(bar, left, size.cx, (4.0 * s) as i32)
-            };
+            let lay = self.layout_of(strip);
+            let Some(left) = self.widget_left(bar, br, right, size.cx, s, &lay) else { return true };
             let mut client = RECT::default();
             let _ = GetClientRect(bar, &mut client);
             let top = ((client.bottom - size.cy) / 2).max(0);
@@ -2147,9 +2396,10 @@ impl App {
             // Not enough room beside this taskbar's task buttons: hidden there (see tick).
             let mut x0 = POINT { x: left, y: top };
             let _ = ClientToScreen(bar, &mut x0);
-            let age = if self.align_left { ROOM_LEFT_AGE } else { ROOM_AGE };
-            let room = batteryhub::tray_probe::room(bar, br, x0.x, x0.x + size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(strip).as_bool()).is_none_or(|r| r)
-                && x0.x + size.cx <= right;
+            let age = if lay.side != SIDE_RIGHT { ROOM_LEFT_AGE } else { ROOM_AGE };
+            let room = lay.side == SIDE_FREE
+                || batteryhub::tray_probe::room(bar, br, x0.x, x0.x + size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(strip).as_bool()).is_none_or(|r| r)
+                    && x0.x + size.cx <= right;
             self.rooms.borrow_mut().insert(bar.0 as isize, room);
             if !room {
                 self.mirror_glides.borrow_mut().retain(|g| g.0 != strip);
@@ -2181,7 +2431,7 @@ impl App {
                 // Shown, same size, only a new place: it glides there (glide_step), like the main strip.
                 let same_size = cur.right - cur.left == size.cx && cur.bottom - cur.top == size.cy;
                 let mut glides = self.mirror_glides.borrow_mut();
-                if !hidden && same_size && !self.popping(strip) {
+                if !hidden && same_size && !self.popping(strip) && self.moving.is_none() {
                     let from = POINT { x: cur.left, y: cur.top };
                     match glides.iter_mut().find(|g| g.0 == strip) {
                         Some(g) if g.2 == sp => {}
@@ -2350,30 +2600,9 @@ impl App {
                 self.place_strip_at(left, top, (tr, bar, top));
                 return;
             }
-            let left = if self.align_left {
-                // Next to the taskbar icons (or the left end, after the widgets button, when they are
-                // centred); placed as soon as UI Automation has told where they end.
-                let found = if self.after_icons {
-                    let exclude = screen_spans(self.taskbar, &foreign_widgets(self.taskbar));
-                    batteryhub::tray_probe::icons_end(self.taskbar, bar, tr.left, &exclude, self.main, WM_TRAY_PROBED)
-                } else {
-                    batteryhub::tray_probe::left_content_end(self.taskbar, bar, self.main, WM_TRAY_PROBED)
-                };
-                let Some(x) = found else { return };
-                let mut p = POINT { x, y: bar.top };
-                let _ = ScreenToClient(self.taskbar, &mut p);
-                p.x + (6.0 * self.scale()) as i32
-            } else {
-                let mut p = POINT { x: tr.left, y: bar.top };
-                let _ = ScreenToClient(self.taskbar, &mut p);
-                let mut left = p.x - self.mv.size.cx - (2.0 * self.scale()) as i32;
-                // Optional extra gap (DPI-independent px), e.g. to sit next to another taskbar widget.
-                if self.offset > 0 {
-                    left -= (self.offset as f32 * self.scale()) as i32;
-                }
-                // Other programs' widgets in the taskbar: sit left of them instead of on top.
-                avoid_widgets(self.taskbar, left, self.mv.size.cx, (4.0 * self.scale()) as i32)
-            };
+            // Placed as soon as UI Automation has told where the taskbar's items are.
+            let lay = self.main_layout();
+            let Some(left) = self.widget_left(self.taskbar, bar, tr.left, self.mv.size.cx, self.scale(), &lay) else { return };
             let mut client = RECT::default();
             let _ = GetClientRect(self.taskbar, &mut client);
             let top = ((client.bottom - self.mv.size.cy) / 2).max(0);
@@ -2392,8 +2621,11 @@ impl App {
             let mut x0 = POINT { x: left, y: top };
             let _ = ClientToScreen(self.taskbar, &mut x0);
             let age = if self.align_left { ROOM_LEFT_AGE } else { ROOM_AGE };
-            let room = batteryhub::tray_probe::room(self.taskbar, bar, x0.x, x0.x + self.mv.size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(self.strip).as_bool()).is_none_or(|r| r)
-                && x0.x + self.mv.size.cx <= tr.left;
+            // Put there with the mouse: stays there.
+            let room = lay.side == SIDE_FREE
+                || batteryhub::tray_probe::room(self.taskbar, bar, x0.x, x0.x + self.mv.size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(self.strip).as_bool())
+                    .is_none_or(|r| r)
+                    && x0.x + self.mv.size.cx <= tr.left;
             self.rooms.borrow_mut().insert(self.taskbar.0 as isize, room);
             if !room {
                 self.glide = None;
@@ -2458,7 +2690,7 @@ impl App {
                 let _ = SetWindowPos(self.strip, Some(HWND_TOP), 0, 0, 0, 0, raise);
                 return;
             }
-            if visible && same_size && from != to {
+            if visible && same_size && from != to && self.moving.is_none() {
                 self.glide = Some((from, to, Instant::now()));
                 let _ = SetWindowPos(self.strip, Some(HWND_TOP), 0, 0, 0, 0, raise);
                 SetTimer(Some(self.main), TIMER_GLIDE, 15, None);
@@ -3556,7 +3788,15 @@ impl App {
 
     /// Two devices swap places on the strip (and in the menu); the order is saved.
     fn swap_devices(&mut self, a: &str, b: &str) {
-        if a == b {
+        if a == b || self.lock_order {
+            return;
+        }
+        if self.own_layout(self.menu_on) {
+            let mut cur = self.order.clone();
+            let lay = self.layout_of(self.menu_on);
+            settings::apply_order(&mut cur, &lay.order);
+            let order = settings::swapped(&cur, &lay.order, a, b);
+            self.change_layout(self.menu_on, true, |l| l.order = order);
             return;
         }
         self.saved_order = settings::swapped(&self.order, &self.saved_order, a, b);
@@ -3569,6 +3809,14 @@ impl App {
 
     /// While dragging: `a` takes the place of `b`, the devices between shift by one (saved).
     fn move_device(&mut self, a: &str, b: &str) {
+        if self.own_layout(self.drag_on) {
+            let mut cur = self.order.clone();
+            let lay = self.layout_of(self.drag_on);
+            settings::apply_order(&mut cur, &lay.order);
+            let order = settings::moved(&cur, &lay.order, a, b);
+            self.change_layout(self.drag_on, true, |l| l.order = order);
+            return;
+        }
         self.saved_order = settings::moved(&self.order, &self.saved_order, a, b);
         settings::set_order(SETTINGS_KEY, &self.saved_order);
         settings::apply_order(&mut self.order, &self.saved_order);
@@ -3698,6 +3946,9 @@ impl App {
 
     /// Left button down on a strip: the device under the mouse can be dragged to another place.
     fn start_drag(&mut self, strip: HWND, x: i32, y: i32) {
+        if self.lock_order {
+            return;
+        }
         let Some(v) = self.view(strip) else { return };
         let x = if v.vertical { y } else { x };
         let Some(i) = v.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| h.2) else { return };
@@ -3986,8 +4237,13 @@ impl App {
         self.light = ui::taskbar_is_light();
         self.offset = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffset").unwrap_or(0);
         let side = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetLeft").unwrap_or(0);
-        self.align_left = side != 0;
-        self.after_icons = side == 2;
+        self.side = side.min(SIDE_FREE);
+        self.align_left = side != SIDE_RIGHT;
+        self.after_icons = side == SIDE_ICONS;
+        self.free_x = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetFreeX").unwrap_or(0) as i32;
+        self.mirroring = batteryhub::util::reg_get_dword(SETTINGS_KEY, "MirrorWidgets").is_none_or(|v| v != 0);
+        self.lock_order = batteryhub::util::reg_get_dword(SETTINGS_KEY, "LockDeviceOrder").unwrap_or(0) != 0;
+        settings::ORDER_LOCKED.store(self.lock_order, std::sync::atomic::Ordering::Relaxed);
         self.hide_empty = batteryhub::util::reg_get_dword(SETTINGS_KEY, "HideWhenEmpty").unwrap_or(0) != 0;
         self.offset_y = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffsetY").unwrap_or(0) as i32;
         self.background = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetBackground").unwrap_or(0) != 0;
@@ -4588,6 +4844,7 @@ unsafe fn show_menu(from: Option<HWND>) {
     unsafe {
         let (main, devices, renamed, hidden, vertical) = with_app(|a| {
             a.hide_tip();
+            a.menu_on = from.filter(|h| a.view(*h).is_some()).unwrap_or(a.strip);
             let renamed: HashSet<String> = a.names.keys().cloned().collect();
             (a.main, a.connected(), renamed, a.hidden.clone(), a.vertical)
         })
@@ -4613,9 +4870,12 @@ unsafe fn show_menu(from: Option<HWND>) {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
             let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
             // Look of the widget: plate behind it, position, and which monitors show it.
-            let (choice, offset, background, offset_y, icons_mode, align_left, hide_empty, vertical_bar, compact) =
-                with_app(|a| (a.choice.clone(), a.offset, a.background, a.offset_y, a.icons_mode, a.align_left, a.hide_empty, a.vertical, a.compact)).unwrap_or_default();
-            let after_icons = with_app(|a| a.after_icons).unwrap_or(false);
+            let (choice, background, icons_mode, hide_empty, vertical_bar, compact) =
+                with_app(|a| (a.choice.clone(), a.background, a.icons_mode, a.hide_empty, a.vertical, a.compact)).unwrap_or_default();
+            // The settings of the widget the menu was opened on (its own with "Mirror other widgets" off).
+            let (target, lay, mirroring, lock_order) =
+                with_app(|a| (a.menu_on, a.layout_of(a.menu_on), a.mirroring, a.lock_order)).unwrap_or_default();
+            let (offset, offset_y, align_left) = (lay.offset, lay.offset_y, lay.side != SIDE_RIGHT);
             let others: Vec<(String, String)> =
                 secondary_taskbars().into_iter().take(ID_MONITOR_GONE - ID_MONITOR_FIRST).map(|b| (monitor_id(b), monitor_label(b))).collect();
             let languages = batteryhub::i18n::available();
@@ -4646,12 +4906,26 @@ unsafe fn show_menu(from: Option<HWND>) {
                     let left_ok = if vertical_bar { MF_GRAYED } else { MF_ENABLED };
                     let _ = AppendMenuW(sub, MF_STRING | left_ok, ID_SIDE_ICONS, &windows::core::HSTRING::from(tr("Next to the icons")));
                     let _ = AppendMenuW(sub, MF_STRING | left_ok, ID_SIDE_LEFT, &windows::core::HSTRING::from(tr("Left")));
-                    let on = match (align_left && !vertical_bar, after_icons) {
-                        (false, _) => ID_SIDE_RIGHT,
-                        (true, true) => ID_SIDE_ICONS,
-                        (true, false) => ID_SIDE_LEFT,
+                    // Right before the taskbar icons: only when they are centred.
+                    let before_ok = if vertical_bar || !taskbar_centred() { MF_GRAYED } else { MF_ENABLED };
+                    let _ = AppendMenuW(sub, MF_STRING | before_ok, ID_SIDE_BEFORE, &windows::core::HSTRING::from(tr("Before the icons")));
+                    let on = match lay.side {
+                        _ if vertical_bar => Some(ID_SIDE_RIGHT),
+                        SIDE_LEFT => Some(ID_SIDE_LEFT),
+                        SIDE_ICONS => Some(ID_SIDE_ICONS),
+                        SIDE_BEFORE => Some(ID_SIDE_BEFORE),
+                        SIDE_FREE => None,
+                        _ => Some(ID_SIDE_RIGHT),
                     };
-                    let _ = CheckMenuRadioItem(sub, ID_SIDE_RIGHT as u32, ID_SIDE_ICONS as u32, on as u32, MF_BYCOMMAND.0);
+                    match on {
+                        Some(on) => {
+                            let _ = CheckMenuRadioItem(sub, ID_SIDE_RIGHT as u32, ID_SIDE_BEFORE as u32, on as u32, MF_BYCOMMAND.0);
+                        }
+                        None => {
+                            // Put somewhere with the mouse ("Position on the taskbar > Change position").
+                            let _ = AppendMenuW(sub, MF_STRING | MF_GRAYED | MF_CHECKED, 0, &windows::core::HSTRING::from(tr("Where you moved it")));
+                        }
+                    }
                     let n = GetMenuItemCount(Some(widget));
                     let _ = AppendMenuW(widget, MF_STRING | MF_POPUP, sub.0 as usize, &windows::core::HSTRING::from(tr("Widget position")));
                     icons.set(widget, n as u32, true, ui::glyph::SETTINGS);
@@ -4666,7 +4940,8 @@ unsafe fn show_menu(from: Option<HWND>) {
                     let mut checked = ID_POSITION_CUSTOM;
                     for (i, px) in POSITION_OFFSETS.iter().enumerate() {
                         let label = if *px == 0 { tr("Next to the notification area") } else { trf("{px} px to the left", &[("px", &px.to_string())]) };
-                        let _ = AppendMenuW(sub, MF_STRING, ID_POSITION_FIRST + i, &windows::core::HSTRING::from(label));
+                        let grey = if align_left && !vertical_bar { MF_GRAYED } else { MF_ENABLED };
+                        let _ = AppendMenuW(sub, MF_STRING | grey, ID_POSITION_FIRST + i, &windows::core::HSTRING::from(label));
                         if *px == offset {
                             checked = ID_POSITION_FIRST + i;
                         }
@@ -4678,15 +4953,22 @@ unsafe fn show_menu(from: Option<HWND>) {
                     }
                     let _ = CheckMenuRadioItem(sub, ID_POSITION_FIRST as u32, ID_POSITION_CUSTOM as u32, checked as u32, MF_BYCOMMAND.0);
                     let _ = AppendMenuW(sub, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
-                    let step = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
+                    let step = |on: bool| if on && !(align_left && !vertical_bar) { MF_STRING } else { MF_STRING | MF_GRAYED };
                     let _ = AppendMenuW(sub, step(offset < POSITION_MAX), ID_POSITION_LEFT, &windows::core::HSTRING::from(tr("Move 10 px left")));
                     icons.set(sub, ID_POSITION_LEFT as u32, false, ui::glyph::LEFT);
                     let _ = AppendMenuW(sub, step(offset > 0), ID_POSITION_RIGHT, &windows::core::HSTRING::from(tr("Move 10 px right")));
                     icons.set(sub, ID_POSITION_RIGHT as u32, false, ui::glyph::RIGHT);
+                    // Anywhere along the taskbar: the widget follows the mouse, a click puts it down.
+                    let _ = AppendMenuW(sub, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
+                    let _ = AppendMenuW(
+                        sub,
+                        MF_STRING | if vertical_bar { MF_GRAYED } else { MF_ENABLED },
+                        ID_POSITION_MOVE,
+                        &windows::core::HSTRING::from(tr("Change position (move it, then click)")),
+                    );
+                    icons.set(sub, ID_POSITION_MOVE as u32, false, ui::glyph::SETTINGS);
                     let n = GetMenuItemCount(Some(widget));
-                    // The px steps count from the clock: not used next to the taskbar icons.
-                    let grey = if align_left && !vertical_bar { MF_GRAYED } else { MF_ENABLED };
-                    let _ = AppendMenuW(widget, MF_STRING | MF_POPUP | grey, sub.0 as usize, &windows::core::HSTRING::from(tr("Position on the taskbar")));
+                    let _ = AppendMenuW(widget, MF_STRING | MF_POPUP, sub.0 as usize, &windows::core::HSTRING::from(tr("Position on the taskbar")));
                     icons.set(widget, n as u32, true, ui::glyph::SETTINGS);
                 }
                 if let Ok(sub) = CreatePopupMenu() {
@@ -4748,7 +5030,9 @@ unsafe fn show_menu(from: Option<HWND>) {
                     let n = GetMenuItemCount(Some(widget));
                     let _ = AppendMenuW(widget, MF_STRING | MF_POPUP, sub.0 as usize, &windows::core::HSTRING::from(tr("Show widget on")));
                     icons.set(widget, n as u32, true, ui::glyph::MONITOR);
+                    let _ = AppendMenuW(widget, MF_STRING | check(mirroring), ID_MIRRORING, &windows::core::HSTRING::from(tr("Mirror other widgets")));
                 }
+                let _ = AppendMenuW(widget, MF_STRING | check(lock_order), ID_LOCK_ORDER, &windows::core::HSTRING::from(tr("Lock device positions")));
                 let n = GetMenuItemCount(Some(menu));
                 let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, widget.0 as usize, &windows::core::HSTRING::from(tr("Widget")));
                 icons.set(menu, n as u32, true, ui::glyph::VIEW);
@@ -4915,18 +5199,57 @@ unsafe fn show_menu(from: Option<HWND>) {
                         );
                     }
                 }
-                ID_SIDE_RIGHT | ID_SIDE_LEFT | ID_SIDE_ICONS => {
+                ID_SIDE_RIGHT | ID_SIDE_LEFT | ID_SIDE_ICONS | ID_SIDE_BEFORE => {
                     let side = match cmd.0 as usize {
-                        ID_SIDE_LEFT => 1,
-                        ID_SIDE_ICONS => 2,
-                        _ => 0,
+                        ID_SIDE_LEFT => SIDE_LEFT,
+                        ID_SIDE_ICONS => SIDE_ICONS,
+                        ID_SIDE_BEFORE => SIDE_BEFORE,
+                        _ => SIDE_RIGHT,
                     };
-                    save_dword("WidgetLeft", side);
+                    with_app(|a| a.change_layout(target, true, |l| l.side = side));
+                }
+                ID_POSITION_MOVE => {
+                    with_app(|a| a.begin_move(target));
+                }
+                ID_LOCK_ORDER => {
                     with_app(|a| {
-                        a.align_left = side != 0;
-                        a.after_icons = side == 2;
+                        a.lock_order = !a.lock_order;
+                        save_dword("LockDeviceOrder", a.lock_order as u32);
+                        settings::ORDER_LOCKED.store(a.lock_order, std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
+                ID_MIRRORING => {
+                    let on = !mirroring;
+                    message(
+                        main,
+                        &tr(if on {
+                            "Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution)."
+                        } else {
+                            "Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now."
+                        }),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                    with_app(|a| {
+                        // Turning it off: every copy starts from the main widget's place and order.
+                        if !on {
+                            let lay = a.main_layout();
+                            let bars: Vec<HWND> = a.mirrors.iter().chain(a.parked.iter()).map(|m| m.0).collect();
+                            for bar in bars {
+                                if load_layout(bar).is_none() {
+                                    let key = widget_key(bar);
+                                    save_layout(&key, &lay);
+                                    settings::set_order(&key, &lay.order);
+                                }
+                            }
+                        }
+                        a.mirroring = on;
+                        save_dword("MirrorWidgets", on as u32);
+                        for v in a.views.values_mut() {
+                            v.lay = None;
+                            v.reordered = true;
+                        }
                         a.last_place = Default::default();
-                        a.place();
+                        a.paint();
                         a.sync_mirrors();
                     });
                 }
@@ -4970,12 +5293,24 @@ unsafe fn show_menu(from: Option<HWND>) {
                         a.paint();
                     });
                 }
-                id if (ID_POSITION_FIRST..ID_POSITION_FIRST + POSITION_OFFSETS.len()).contains(&id) => set_offset(POSITION_OFFSETS[id - ID_POSITION_FIRST]),
-                ID_POSITION_LEFT => set_offset((offset + 10).min(POSITION_MAX)),
-                ID_POSITION_RIGHT => set_offset(offset.saturating_sub(10)),
-                id if (ID_HEIGHT_FIRST..ID_HEIGHT_FIRST + HEIGHT_OFFSETS.len()).contains(&id) => set_offset_y(HEIGHT_OFFSETS[id - ID_HEIGHT_FIRST]),
-                ID_HEIGHT_UP => set_offset_y((offset_y - 10).max(-HEIGHT_MAX)),
-                ID_HEIGHT_DOWN => set_offset_y((offset_y + 10).min(HEIGHT_MAX)),
+                id if (ID_POSITION_FIRST..ID_POSITION_FIRST + POSITION_OFFSETS.len()).contains(&id) => {
+                    with_app(|a| a.change_layout(target, true, |l| l.offset = POSITION_OFFSETS[id - ID_POSITION_FIRST]));
+                }
+                ID_POSITION_LEFT => {
+                    with_app(|a| a.change_layout(target, true, |l| l.offset = (offset + 10).min(POSITION_MAX)));
+                }
+                ID_POSITION_RIGHT => {
+                    with_app(|a| a.change_layout(target, true, |l| l.offset = offset.saturating_sub(10)));
+                }
+                id if (ID_HEIGHT_FIRST..ID_HEIGHT_FIRST + HEIGHT_OFFSETS.len()).contains(&id) => {
+                    with_app(|a| a.change_layout(target, true, |l| l.offset_y = HEIGHT_OFFSETS[id - ID_HEIGHT_FIRST]));
+                }
+                ID_HEIGHT_UP => {
+                    with_app(|a| a.change_layout(target, true, |l| l.offset_y = (offset_y - 10).max(-HEIGHT_MAX)));
+                }
+                ID_HEIGHT_DOWN => {
+                    with_app(|a| a.change_layout(target, true, |l| l.offset_y = (offset_y + 10).min(HEIGHT_MAX)));
+                }
                 id if id == ID_MONITOR_ALL || id == ID_MONITOR_MAIN || (ID_MONITOR_FIRST..ID_MONITOR_FIRST + others.len()).contains(&id) => {
                     let v = match id {
                         ID_MONITOR_ALL => "all".to_string(),
@@ -5072,46 +5407,13 @@ unsafe fn show_menu(from: Option<HWND>) {
     }
 }
 
-/// Gap left of the notification area (TaskbarOffset, px).
-fn set_offset(px: u32) {
-    if px == 0 {
-        batteryhub::util::reg_delete_value(SETTINGS_KEY, "TaskbarOffset");
-    } else {
-        save_dword("TaskbarOffset", px);
-    }
-    with_app(|a| {
-        a.offset = px;
-        a.last_place = Default::default();
-        a.place();
-        a.sync_mirrors();
-    });
-}
 
-/// Up / down shift of the widget (TaskbarOffsetY, px, + = down).
 /// Progress of a glide that started at `t0`, eased out (0 to 1).
 fn glide_ease(t0: Instant) -> f32 {
     let p = (t0.elapsed().as_secs_f32() * 1000.0 / GLIDE_MS).min(1.0);
     1.0 - (1.0 - p).powi(3)
 }
 
-fn set_offset_y(px: i32) {
-    if px == 0 {
-        batteryhub::util::reg_delete_value(SETTINGS_KEY, "TaskbarOffsetY");
-    } else {
-        save_dword("TaskbarOffsetY", px as u32);
-    }
-    with_app(|a| {
-        if a.offset_y != px {
-            a.y_glide = Some((a.shown_offset_y(), Instant::now()));
-            unsafe {
-                SetTimer(Some(a.main), TIMER_GLIDE, 15, None);
-            }
-        }
-        a.offset_y = px;
-        a.paint();
-        a.sync_mirrors();
-    });
-}
 
 /// "Reset measurements": asks first, then deletes the device's history.
 const BATTERY_ONLY_QUESTION: &str = n_(
@@ -5548,7 +5850,13 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             WM_MEASUREITEM if ui::measure_menu_item(lp) => LRESULT(1),
             WM_DRAWITEM if ui::draw_menu_item(lp) => LRESULT(1),
             WM_MOUSEMOVE => {
-                with_app(|a| a.hover(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32));
+                with_app(|a| {
+                    if a.moving.is_some() {
+                        a.move_step();
+                    } else {
+                        a.hover(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+                    }
+                });
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
@@ -5571,12 +5879,23 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
+                // Right-click while moving: back to where it was.
+                if with_app(|a| a.moving.is_some()).unwrap_or(false) {
+                    with_app(|a| a.end_move(false));
+                    return LRESULT(0);
+                }
                 with_app(|a| a.end_drag());
                 show_menu(Some(hwnd));
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
-                with_app(|a| a.start_drag(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32));
+                with_app(|a| {
+                    if a.moving.is_some() {
+                        a.end_move(true);
+                    } else {
+                        a.start_drag(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+                    }
+                });
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -5584,7 +5903,10 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 LRESULT(0)
             }
             WM_CAPTURECHANGED => {
-                with_app(|a| a.drag = None);
+                with_app(|a| {
+                    a.drag = None;
+                    a.end_move(true);
+                });
                 LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),

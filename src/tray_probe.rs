@@ -175,6 +175,25 @@ pub fn icons_end(bar: HWND, bar_rect: RECT, limit: i32, exclude: &[(i32, i32)], 
     items(bar, bar_rect, notify, msg, LEFT_REFRESH).map(|v| last_item_end(&v, bar_rect.left, limit, exclude))
 }
 
+/// Screen x where the taskbar's icons start: the first item after the items at the taskbar's left
+/// end (with centred icons, the first centred one), before `limit`; items over `exclude` don't
+/// count. None until the first answer.
+pub fn icons_start(bar: HWND, bar_rect: RECT, limit: i32, exclude: &[(i32, i32)], notify: HWND, msg: u32) -> Option<i32> {
+    items(bar, bar_rect, notify, msg, LEFT_REFRESH).map(|v| first_item_start(&v, bar_rect.left, bar_rect.bottom - bar_rect.top, limit, exclude))
+}
+
+/// The left end of the first item after the run at the taskbar's left end (see left_chain_end)
+/// and before `limit`, skipping those over `exclude`; the end of that run when there is none.
+pub fn first_item_start(items: &[(i32, i32)], bar_left: i32, bar_h: i32, limit: i32, exclude: &[(i32, i32)]) -> i32 {
+    let chain = left_chain_end(items, bar_left, bar_h);
+    items
+        .iter()
+        .filter(|&&(l, r)| l >= chain && r <= limit && r > l && !exclude.iter().any(|&(a, b)| l < b && r > a))
+        .map(|&(l, _)| l)
+        .min()
+        .unwrap_or(chain)
+}
+
 /// The right end of the last item ending at or before `limit`, skipping those over `exclude`;
 /// `bar_left` when there is none.
 pub fn last_item_end(items: &[(i32, i32)], bar_left: i32, limit: i32, exclude: &[(i32, i32)]) -> i32 {
@@ -335,6 +354,15 @@ mod tests {
         // Another program's widget at 1500..1600 doesn't count.
         assert_eq!(last_item_end(&[(700, 788), (1500, 1600)], 0, 1700, &[(1500, 1600)]), 788);
         assert_eq!(last_item_end(&[], 0, 1700, &[]), 0);
+    }
+
+    #[test]
+    fn start_of_the_icons() {
+        // Widgets button at the left end, centred icons from 700, the tray from 1700.
+        let items = [(0, 160), (700, 744), (744, 788), (1700, 1740)];
+        assert_eq!(first_item_start(&items, 0, 48, 1700, &[]), 700);
+        // Nothing centred: the end of the left run.
+        assert_eq!(first_item_start(&[(0, 55), (55, 99)], 0, 48, 1700, &[]), 99);
     }
 
     #[test]

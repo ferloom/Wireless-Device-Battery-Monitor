@@ -279,6 +279,9 @@ pub fn set_hidden(settings_key: &str, device_key: &str, hide: bool) -> bool {
 
 // ---- order on the taskbar ---------------------------------------------------------------------
 
+/// "Lock device positions" is on (the devices' Move left / right are greyed).
+pub static ORDER_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Device keys in the order the user put them in (dragged on the strip, or "Move left / right").
 pub fn order(settings_key: &str) -> Vec<String> {
     let mut v: Vec<(u32, String)> = inst::open(HKCU, &sub(settings_key, "Order"), false)
@@ -605,7 +608,9 @@ pub fn append_device_menus(
             } else {
                 ((n_("Move left"), glyph::LEFT), (n_("Move right"), glyph::RIGHT))
             };
-            for (item, (label, g), enabled) in [(ITEM_MOVE_BACK, back, i > 0), (ITEM_MOVE_ON, on, i + 1 < devices.len())] {
+            // Not while "Lock device positions" is on.
+            let free = !ORDER_LOCKED.load(std::sync::atomic::Ordering::Relaxed);
+            for (item, (label, g), enabled) in [(ITEM_MOVE_BACK, back, free && i > 0), (ITEM_MOVE_ON, on, free && i + 1 < devices.len())] {
                 let _ = AppendMenuW(sub, MF_STRING | if enabled { MF_ENABLED } else { MF_GRAYED }, id(item), &hs(&tr(label)));
                 icons.set(sub, id(item) as u32, false, g);
             }
