@@ -336,7 +336,15 @@ struct App {
     /// The next poll was triggered by a device connecting / disconnecting: devices that are gone
     /// and have no sleep grace period disappear at once instead of after MIN_GRACE_SEC.
     devchange: bool,
-    size: SIZE,
+    /// The main taskbar's widget: its render, hit ranges and animations.
+    mv: View,
+    /// The copies on other monitors (and the hidden ones kept ready), each rendered for its own
+    /// taskbar: keyed by strip window.
+    views: HashMap<isize, View>,
+    /// Fonts for the other monitors' DPI scales (the main one's are `fonts`).
+    fonts_more: Vec<Fonts>,
+    /// Strip the device being dragged belongs to.
+    drag_on: HWND,
     last_place: (RECT, RECT, i32),
     /// Main strip uses a topmost popup owned by `Shell_TrayWnd` (e.g. when Start11's SDTaskbar
     /// sits inside `Shell_TrayWnd` and fights child-window Z-order).
@@ -353,8 +361,6 @@ struct App {
     /// created at the moment it is needed loses its first updates (its pop-in stalled, or it
     /// stayed blank), so a copy is made ahead of time and reused when the widget comes back.
     parked: Vec<(HWND, HWND)>,
-    /// Strip x ranges of the devices drawn in the last paint: (from, to, device index).
-    hits: Vec<(i32, i32, usize)>,
     /// Hover tooltip (tracking tooltip owned by the main window) and what it shows right now.
     tip: HWND,
     /// Hover card (device, level, last 24 hours) and the levels it charts.
@@ -429,10 +435,6 @@ struct App {
     shell_msg: u32,
     /// Copies of the strip on the taskbars of other monitors ("Show widget on"): (taskbar, strip).
     mirrors: Vec<(HWND, HWND)>,
-    /// Pixels of the last render, pushed to every mirror as well.
-    pixels: Vec<u32>,
-    /// The same render on the hover plate (made once per render, not on every hover).
-    lit: Vec<u32>,
     /// Strip the tooltip belongs to (the main strip or a mirror).
     tip_on: HWND,
     /// Strip under the mouse: drawn with the taskbar's hover plate.
@@ -473,13 +475,8 @@ struct App {
     /// While dragging: the mouse along the strip, and where in the device it was grabbed.
     drag_at: i32,
     grab: i32,
-    /// Where each device starts along the strip in the last render: its place, and where it was
-    /// drawn (moving devices are drawn away from their place).
-    starts: std::collections::HashMap<String, i32>,
-    drawn_at: std::collections::HashMap<String, f32>,
-    /// Devices sliding to a new place: distance still to go when it started, and when.
-    slides: std::collections::HashMap<String, (f32, Instant)>,
-    /// The order changed since the last render: devices slide from where they were drawn.
+    /// The order changed since the last render: devices slide from where they were drawn (handed
+    /// to every widget at its next render).
     reordered: bool,
     /// When each device was last written as seen, and when unseen devices were last forgotten.
     seen_saved: std::collections::HashMap<String, u64>,
@@ -488,8 +485,59 @@ struct App {
     /// device as it was, so one that left can still pop out).
     presence: std::collections::HashMap<String, Presence>,
     shown: Vec<(String, Option<DeviceStatus>)>,
+}
+
+/// One taskbar's widget: what it shows, where its devices are, and how they move. Every taskbar's
+/// widget is rendered on its own, for that taskbar's DPI, height and orientation (a copy of the
+/// main one's pixels came out at the wrong scale on a monitor with other scaling).
+#[derive(Default)]
+struct View {
+    /// The last render (premultiplied), and the same on the hover plate.
+    px: Vec<u32>,
+    lit: Vec<u32>,
+    size: SIZE,
+    /// Ranges of the devices along the strip (x, or y on a vertical taskbar): (from, to, device index).
+    hits: Vec<(i32, i32, usize)>,
+    /// Where each device starts along the strip in the last render: its place, and where it was
+    /// drawn (moving devices are drawn away from their place).
+    starts: HashMap<String, i32>,
+    drawn_at: HashMap<String, f32>,
+    /// Devices sliding to a new place: distance still to go when it started, and when.
+    slides: HashMap<String, (f32, Instant)>,
+    /// The order changed since this widget's last render.
+    reordered: bool,
     /// Length of the strip in the last render (width, or height on a vertical taskbar).
     strip_len: i32,
+    /// DPI scale and orientation it was rendered for.
+    scale: f32,
+    vertical: bool,
+}
+
+/// What a widget is rendered for: its taskbar's DPI scale, orientation, and height (horizontal)
+/// or width (vertical).
+#[derive(Clone, Copy)]
+struct Target {
+    s: f32,
+    vertical: bool,
+    extent: i32,
+}
+
+/// The render `px` on the taskbar's hover plate: a rounded, slightly lighter (dark taskbar) or
+/// darker (light taskbar) rectangle behind the content, like the taskbar's own buttons.
+fn lit_pixels(px: &[u32], size: SIZE, s: f32, light: bool) -> Vec<u32> {
+    let (w, h) = (size.cx, size.cy);
+    let mut plate = Canvas { w, h, px: vec![0; (w * h).max(0) as usize] };
+    let (color, alpha) = if light { (rgb(0, 0, 0), 14) } else { (rgb(255, 255, 255), 21) };
+    plate.round_rect((4.0 * s).round() as i32, (4.0 * s).round() as i32, color, alpha);
+    px.iter()
+        .zip(&plate.px)
+        .map(|(&c, &p)| {
+            // Content over the plate, both premultiplied.
+            let inv = 255 - (c >> 24);
+            let ch = |sh: u32| (((c >> sh) & 0xFF) + ((p >> sh) & 0xFF) * inv / 255).min(255);
+            ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0)
+        })
+        .collect()
 }
 
 thread_local! {
@@ -1074,18 +1122,95 @@ impl App {
             return;
         }
         self.painted_for = self.render_target();
-        let s = self.scale();
+        let devices = self.visible();
+        let items = self.strip_items(&devices);
+        if std::mem::take(&mut self.reordered) {
+            self.mv.reordered = true;
+            for v in self.views.values_mut() {
+                v.reordered = true;
+            }
+        }
+        // The main taskbar's widget.
+        let target = self.bar_target(self.taskbar);
+        let mut mv = std::mem::take(&mut self.mv);
+        let before = mv.size;
+        self.render(&mut mv, &items, target, self.strip);
+        let resized = before != mv.size;
+        self.mv = mv;
+        if !self.popping(self.strip) {
+            self.push(self.strip);
+        }
+        // Every copy on another monitor: rendered for its own taskbar.
+        let copies: Vec<(HWND, HWND)> = self.mirrors.iter().chain(self.parked.iter()).copied().collect();
+        self.views.retain(|k, _| copies.iter().any(|c| c.1.0 as isize == *k));
+        let mut grown = Vec::new();
+        for (bar, strip) in copies {
+            let key = strip.0 as isize;
+            let mut v = self.views.remove(&key).unwrap_or_default();
+            let before = v.size;
+            let target = self.bar_target(bar);
+            self.render(&mut v, &items, target, strip);
+            let resized = before != v.size;
+            self.views.insert(key, v);
+            // A new size: its placement below gives it the image together with its new place.
+            if resized && self.mirrors.iter().any(|m| m.1 == strip) {
+                grown.push(strip);
+            } else if !self.popping(strip) {
+                self.push(strip);
+            }
+        }
+        self.sync_slide_timer();
+        let animating = self.drag.is_some() || self.sliding() || !self.presence.is_empty() || self.y_glide.is_some();
+        if resized || !animating {
+            self.last_place.2 = -1; // force a reposition with the new width
+            self.place();
+        }
+        // The copies keep their left edge when their width changes: move them too, so their right
+        // edge stays next to the clock (not only at the next timer tick).
+        for i in 0..self.mirrors.len() {
+            if !animating || grown.contains(&self.mirrors[i].1) {
+                self.place_mirror_at(i);
+            }
+        }
+    }
+
+    /// DPI scale, orientation and size of the taskbar `bar` (what its widget is rendered for).
+    fn bar_target(&self, bar: HWND) -> Target {
+        let dpi = unsafe { GetDpiForWindow(bar) };
+        let s = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+        let mut c = RECT::default();
+        unsafe {
+            let _ = GetClientRect(bar, &mut c);
+        }
+        let (w, h) = (c.right - c.left, c.bottom - c.top);
+        let vertical = if bar == self.taskbar { self.vertical } else { h > w };
+        Target { s, vertical, extent: if vertical { w } else { h } }
+    }
+
+    /// The fonts of the strip (icons, bolt, text) for DPI scale `s`.
+    fn strip_fonts(&mut self, s: f32) -> (HFONT, HFONT, HFONT) {
+        if s == self.scale() {
+            self.ensure_fonts();
+            return self.fonts.as_ref().map(|f| (f.icons, f.bolt, f.text)).unwrap_or_default();
+        }
+        if !self.fonts_more.iter().any(|f| f.scale == s) {
+            if self.fonts_more.len() >= 4 {
+                self.fonts_more.remove(0);
+            }
+            self.fonts_more.push(Fonts::new(s));
+        }
+        self.fonts_more.iter().find(|f| f.scale == s).map(|f| (f.icons, f.bolt, f.text)).unwrap_or_default()
+    }
+
+    /// The pieces of every item (icon, level, bolt) drawn for DPI scale `s`.
+    fn pieces(&mut self, items: &[Item], s: f32, vertical: bool) -> Vec<Piece> {
         let px = |v: f32| (v * s).round() as i32;
         let light = self.light;
         // Same colours, fonts and spacing as the original C++ widget.
         let fg = if light { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
         let red = ui::low_color(light);
-        self.ensure_fonts();
-        let (icons, bolt, text) = self.fonts.as_ref().map(|f| (f.icons, f.bolt, f.text)).unwrap_or_default();
-
+        let (icons, bolt, text) = self.strip_fonts(s);
         let mut pieces: Vec<Piece> = Vec::new();
-        let devices = self.visible();
-        let items = self.strip_items(&devices);
         for (i, it) in items.iter().enumerate() {
             let Some(d) = &it.dev else {
                 if it.key == REFRESH_KEY {
@@ -1129,7 +1254,7 @@ impl App {
                 Some(b) => {
                     let (l, r) = buds_low.unwrap_or((low, low));
                     let (ml, mr) = (mask(&format!("{}%", b.left), text, light), mask(&format!("{}%", b.right), text, light));
-                    if self.vertical {
+                    if vertical {
                         let at = ml.h;
                         Piece::split(Some(i), stack_masks(&ml, &mr, px(1.0)), at, true, (tint(l), tint(r)), alpha, gap)
                     } else {
@@ -1154,19 +1279,32 @@ impl App {
                 pieces.push(Piece::new(Some(i), mask("\u{E945}", bolt, light), c, alpha, 0));
             }
         }
-        // The refresh glyph is an item of its own (strip_items): it pops in and out like a device.
-        let refresh = false;
-        let mut tb = RECT::default();
-        unsafe {
-            let _ = GetClientRect(self.taskbar, &mut tb);
+        pieces
+    }
+
+    /// Renders one widget for `t` into `v` (pixels, size, hit ranges, animations). `strip` is its
+    /// window (the device held by the mouse is drawn there only).
+    fn render(&mut self, v: &mut View, items: &[Item], t: Target, strip: HWND) {
+        let pieces = self.pieces(items, t.s, t.vertical);
+        let drag_here = self.drag.is_some() && strip == self.drag_on;
+        if t.vertical {
+            let w = t.extent.clamp((32.0 * t.s).round() as i32, (160.0 * t.s).round() as i32);
+            self.render_column(v, &pieces, items, w, t.s, drag_here);
+        } else {
+            self.render_row(v, &pieces, items, t.extent, t.s, drag_here);
         }
-        if self.vertical {
-            self.paint_column(&pieces, &items, refresh, (tb.right - tb.left).clamp(px(32.0), px(160.0)), s, light);
-            return;
-        }
-        let h = (tb.bottom - tb.top).clamp(px(24.0), px(64.0));
+        v.scale = t.s;
+        v.vertical = t.vertical;
+        v.lit = lit_pixels(&v.px, v.size, t.s, self.light);
+    }
+
+    /// Horizontal taskbar: the devices side by side, `bar_h` high.
+    fn render_row(&mut self, v: &mut View, pieces: &[Piece], items: &[Item], bar_h: i32, s: f32, drag_here: bool) {
+        let px = |x: f32| (x * s).round() as i32;
+        let light = self.light;
+        let h = bar_h.clamp(px(24.0), px(64.0));
         // The padding comes and goes with the first item and the last one.
-        let fmax = items.iter().map(|it| it.f).fold(if refresh { 1.0 } else { 0.0 }, f32::max);
+        let fmax = items.iter().map(|it| it.f).fold(0.0, f32::max);
         let pad = px(8.0) as f32 * fmax;
         let dev_gap = px(14.0) as f32;
         // Lay out: each item at its full width, taking only its share of it (the ones after it
@@ -1190,22 +1328,21 @@ impl App {
                 cx += pieces[k].m.w + if pieces.get(k + 1).is_some_and(|q| q.dev == Some(i)) { pieces[k].gap_after } else { 0 };
                 k += 1;
             }
-            if compact
-                && k > first + 1 {
-                    let icon = &pieces[first];
-                    let row_start = icon.m.w + icon.gap_after;
-                    let row_w = cx - row_start;
-                    let row_h = pieces[first + 1..k].iter().map(|p| p.m.h).max().unwrap_or(0);
-                    let gap = px(1.0);
-                    let y = (h - icon.m.h - gap - row_h) / 2;
-                    cx = icon.m.w.max(row_w);
-                    xs[first] = start + (cx - icon.m.w) / 2;
-                    ys[first] = Some(y);
-                    for j in first + 1..k {
-                        xs[j] += (cx - row_w) / 2 - row_start;
-                        ys[j] = Some(y + icon.m.h + gap + (row_h - pieces[j].m.h) / 2);
-                    }
+            if compact && k > first + 1 {
+                let icon = &pieces[first];
+                let row_start = icon.m.w + icon.gap_after;
+                let row_w = cx - row_start;
+                let row_h = pieces[first + 1..k].iter().map(|p| p.m.h).max().unwrap_or(0);
+                let gap = px(1.0);
+                let y = (h - icon.m.h - gap - row_h) / 2;
+                cx = icon.m.w.max(row_w);
+                xs[first] = start + (cx - icon.m.w) / 2;
+                ys[first] = Some(y);
+                for j in first + 1..k {
+                    xs[j] += (cx - row_w) / 2 - row_start;
+                    ys[j] = Some(y + icon.m.h + gap + (row_h - pieces[j].m.h) / 2);
                 }
+            }
             ranges[i] = (start, start + cx);
             x += cx as f32 * items[i].f;
         }
@@ -1224,15 +1361,15 @@ impl App {
             cv.round_rect(px(4.0), px(6.0), plate, 235);
         }
         // Each visible device owns its pieces plus half of the gap around them.
-        self.hits.clear();
+        v.hits.clear();
         for (i, it) in items.iter().enumerate() {
-            if let Some(v) = it.vis {
-                let from = self.hits.last().map(|h| h.1).unwrap_or(0);
-                self.hits.push((from, ranges[i].1 + (dev_gap / 2.0) as i32, v));
+            if let Some(vi) = it.vis {
+                let from = v.hits.last().map(|h| h.1).unwrap_or(0);
+                v.hits.push((from, ranges[i].1 + (dev_gap / 2.0) as i32, vi));
             }
         }
         let keys: Vec<String> = items.iter().map(|it| it.key.clone()).collect();
-        let moves = self.motion(&keys, &ranges, w, s);
+        let moves = self.motion(v, &keys, &ranges, w, s, drag_here);
         let shift_y = self.shown_offset_y();
         // The dragged device last, over the others.
         let held = |p: &Piece| p.dev.is_some_and(|i| moves[i].2 < 255);
@@ -1258,48 +1395,18 @@ impl App {
                 }
             }
         }
-        if let Some(last) = self.hits.last_mut() {
+        if let Some(last) = v.hits.last_mut() {
             last.1 = w;
         }
-        let resized = self.size.cx != w || self.size.cy != h;
-        self.size = SIZE { cx: w, cy: h };
-        self.pixels = cv.px;
-        self.lit = self.hover_pixels();
-        if !self.popping(self.strip) {
-            self.push(self.strip);
-        }
-        // Same size: the copies get the new image here. A new size: their placement below gives
-        // it to them together with their new place.
-        if !resized {
-            for i in 0..self.mirrors.len() {
-                let m = self.mirrors[i].1;
-                if !self.popping(m) {
-                    self.push(m);
-                }
-            }
-        }
-        for i in 0..self.parked.len() {
-            let m = self.parked[i].1;
-            if !self.popping(m) {
-                self.push(m);
-            }
-        }
-        if !resized && (self.drag.is_some() || !self.slides.is_empty() || !self.presence.is_empty() || self.y_glide.is_some()) {
-            return; // an animation frame: same size, same place
-        }
-        self.last_place.2 = -1; // force a reposition with the new width
-        self.place();
-        // The copies keep their left edge when their width changes: move them too, so their right
-        // edge stays next to the clock (not only at the next timer tick).
-        for i in 0..self.mirrors.len() {
-            self.place_mirror_at(i);
-        }
+        v.size = SIZE { cx: w, cy: h };
+        v.px = cv.px;
     }
 
     /// Vertical taskbar: each device as its icon over its level (the bolt beside the level when it
     /// fits), devices stacked, as wide as the taskbar. Hit ranges are rows (y).
-    fn paint_column(&mut self, pieces: &[Piece], items: &[Item], refresh: bool, w: i32, s: f32, light: bool) {
-        let px = |v: f32| (v * s).round() as i32;
+    fn render_column(&mut self, v: &mut View, pieces: &[Piece], items: &[Item], w: i32, s: f32, drag_here: bool) {
+        let light = self.light;
+        let px = |x: f32| (x * s).round() as i32;
         let sizes: Vec<(Option<usize>, i32, i32)> = pieces.iter().map(|p| (p.dev, p.m.w, p.m.h)).collect();
         let (pad, dev_gap) = (px(8.0), px(12.0));
         let (placed, full_h, rows) = column_layout(&sizes, w, pad, px(2.0), dev_gap, px(2.0));
@@ -1312,7 +1419,7 @@ impl App {
         }
         // What each item gives back of its height while it appears or leaves: the items below it
         // move up by what the ones above gave back (the column stays on the notification area).
-        let fmax = items.iter().map(|it| it.f).fold(if refresh { 1.0 } else { 0.0 }, f32::max);
+        let fmax = items.iter().map(|it| it.f).fold(0.0, f32::max);
         let mut gone = (1.0 - fmax) * pad as f32;
         let mut shift = vec![0i32; n];
         for i in 0..n {
@@ -1328,7 +1435,7 @@ impl App {
             *r = (r.0 - shift[i], r.1 - shift[i]);
         }
         let ys: Vec<i32> = pieces.iter().zip(&placed).map(|(p, &(_, y, _))| y - p.dev.map(|i| shift[i]).unwrap_or(tail)).collect();
-        let mut hits: Vec<(i32, i32, usize)> = rows.iter().filter_map(|&(a, b, i)| items[i].vis.map(|v| (a - shift[i], b - shift[i], v))).collect();
+        let mut hits: Vec<(i32, i32, usize)> = rows.iter().filter_map(|&(a, b, i)| items[i].vis.map(|vi| (a - shift[i], b - shift[i], vi))).collect();
         if let Some(first) = hits.first_mut() {
             first.0 = 0;
         }
@@ -1341,7 +1448,7 @@ impl App {
             cv.round_rect(0, px(6.0), plate, 235);
         }
         let keys: Vec<String> = items.iter().map(|it| it.key.clone()).collect();
-        let moves = self.motion(&keys, &ranges, h, s);
+        let moves = self.motion(v, &keys, &ranges, h, s, drag_here);
         let held = |p: &Piece| p.dev.is_some_and(|i| moves[i].2 < 255);
         for pass in [false, true] {
             for ((p, &(x, _, show)), &y) in pieces.iter().zip(&placed).zip(&ys) {
@@ -1363,59 +1470,39 @@ impl App {
                 }
             }
         }
-        self.hits = hits;
-        let resized = self.size.cx != w || self.size.cy != h;
-        self.size = SIZE { cx: w, cy: h };
-        self.pixels = cv.px;
-        self.lit = self.hover_pixels();
-        if !self.popping(self.strip) {
-            self.push(self.strip);
-        }
-        // The copies on other monitors too (they only got the image at the once-a-second
-        // placement before, so their animations stuttered). A new size: their placement gives it
-        // to them together with their new place.
-        if !resized {
-            for i in 0..self.mirrors.len() {
-                let m = self.mirrors[i].1;
-                if !self.popping(m) {
-                    self.push(m);
-                }
-            }
-        }
-        for i in 0..self.parked.len() {
-            let m = self.parked[i].1;
-            if !self.popping(m) {
-                self.push(m);
-            }
-        }
-        if !resized && (self.drag.is_some() || !self.slides.is_empty() || !self.presence.is_empty() || self.y_glide.is_some()) {
-            return; // an animation frame: same size, same place
-        }
-        self.last_place.2 = -1;
-        self.place();
-        for i in 0..self.mirrors.len() {
-            self.place_mirror_at(i);
-        }
+        v.hits = hits;
+        v.size = SIZE { cx: w, cy: h };
+        v.px = cv.px;
     }
 
-    /// The last render on the taskbar's hover plate: a rounded, slightly lighter (dark taskbar) or
-    /// darker (light taskbar) rectangle behind the content, like the taskbar's own buttons.
-    fn hover_pixels(&self) -> Vec<u32> {
-        let (w, h) = (self.size.cx, self.size.cy);
-        let s = self.scale();
-        let mut plate = Canvas { w, h, px: vec![0; (w * h) as usize] };
-        let (color, alpha) = if self.light { (rgb(0, 0, 0), 14) } else { (rgb(255, 255, 255), 21) };
-        plate.round_rect((4.0 * s).round() as i32, (4.0 * s).round() as i32, color, alpha);
-        self.pixels
-            .iter()
-            .zip(&plate.px)
-            .map(|(&c, &p)| {
-                // Content over the plate, both premultiplied.
-                let inv = 255 - (c >> 24);
-                let ch = |sh: u32| (((c >> sh) & 0xFF) + ((p >> sh) & 0xFF) * inv / 255).min(255);
-                ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | ch(0)
-            })
-            .collect()
+    /// The widget of `strip` (the main taskbar's or a copy's).
+    fn view(&self, strip: HWND) -> Option<&View> {
+        if strip == self.strip { Some(&self.mv) } else { self.views.get(&(strip.0 as isize)) }
+    }
+
+    fn view_mut(&mut self, strip: HWND) -> Option<&mut View> {
+        if strip == self.strip { Some(&mut self.mv) } else { self.views.get_mut(&(strip.0 as isize)) }
+    }
+
+    /// Whether `strip` is drawn for a vertical taskbar.
+    fn strip_vertical(&self, strip: HWND) -> bool {
+        self.view(strip).map_or(self.vertical, |v| v.vertical)
+    }
+
+    /// Some widget has a device sliding to a new place.
+    fn sliding(&self) -> bool {
+        !self.mv.slides.is_empty() || self.views.values().any(|v| !v.slides.is_empty())
+    }
+
+    /// TIMER_SLIDE runs while devices slide, appear or leave on any widget.
+    fn sync_slide_timer(&self) {
+        unsafe {
+            if !self.sliding() && self.presence.is_empty() {
+                let _ = KillTimer(Some(self.main), TIMER_SLIDE);
+            } else {
+                SetTimer(Some(self.main), TIMER_SLIDE, 15, None);
+            }
+        }
     }
 
     /// Shows or removes the hover plate when the mouse enters or leaves a strip.
@@ -1433,22 +1520,17 @@ impl App {
 
     /// Hands the last render to a strip window (the main strip or a mirror).
     fn push(&self, strip: HWND) {
-        if strip == self.hovered && self.lit.len() == self.pixels.len() {
-            self.push_px(strip, &self.lit);
-        } else {
-            self.push_px(strip, &self.pixels);
-        }
+        let Some(v) = self.view(strip) else { return };
+        let px = if strip == self.hovered && v.lit.len() == v.px.len() { &v.lit } else { &v.px };
+        self.push_px_at(strip, px, v.size, None);
     }
 
-    /// Shows `px` (premultiplied, the strip's size) in `strip`.
-    fn push_px(&self, strip: HWND, px: &[u32]) {
-        self.push_px_at(strip, px, None);
-    }
+
 
     /// Like push_px, and moves the window to `at` (screen) in the same step: a copy that changes
     /// size and place shows the new image in the new place at once, never for a frame in between.
-    fn push_px_at(&self, strip: HWND, px: &[u32], at: Option<POINT>) {
-        let (w, h) = (self.size.cx, self.size.cy);
+    fn push_px_at(&self, strip: HWND, px: &[u32], size: SIZE, at: Option<POINT>) {
+        let (w, h) = (size.cx, size.cy);
         if strip.0.is_null() || px.len() != (w * h) as usize {
             return;
         }
@@ -1473,7 +1555,7 @@ impl App {
                 let ob = SelectObject(mem, HGDIOBJ(bmp.0));
                 let src = POINT::default();
                 let bf = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-                let _ = UpdateLayeredWindow(strip, Some(screen), at.as_ref().map(|p| p as *const POINT), Some(&self.size), Some(mem), Some(&src), COLORREF(0), Some(&bf), ULW_ALPHA);
+                let _ = UpdateLayeredWindow(strip, Some(screen), at.as_ref().map(|p| p as *const POINT), Some(&size), Some(mem), Some(&src), COLORREF(0), Some(&bf), ULW_ALPHA);
                 SelectObject(mem, ob);
                 let _ = DeleteObject(HGDIOBJ(bmp.0));
             }
@@ -1727,6 +1809,7 @@ impl App {
                 }
             }
         }
+        let mut added = false;
         for bar in bars {
             if self.mirrors.iter().any(|m| m.0 == bar) {
                 continue;
@@ -1741,7 +1824,7 @@ impl App {
                 }
             };
             self.mirrors.push((bar, strip));
-            self.push(strip);
+            added = true;
         }
         // Every other taskbar gets a hidden copy ready, so the widget can appear there smoothly.
         for bar in all_bars {
@@ -1750,9 +1833,12 @@ impl App {
             }
             if let Some(strip) = create_copy(bar) {
                 dbg_log(&format!("parked strip {strip:?} on {bar:?}"));
-                self.push(strip);
                 self.parked.push((bar, strip));
+                added = true;
             }
+        }
+        if added {
+            self.paint(); // their own render, for their own taskbars
         }
         // Stray copies (e.g. left by an Explorer restart): our popups not in either list.
         {
@@ -1910,8 +1996,9 @@ impl App {
     /// One frame of a copy popping in (`p` 0 to 1): it grows from 60 % around its centre with a
     /// small overshoot, fades in and is blurred while it moves, like the devices on the strip.
     fn mirror_in_frame(&self, strip: HWND, p: f32) {
+        let Some(v) = self.view(strip) else { return };
         if p <= 0.0 {
-            self.push_px(strip, &vec![0; self.pixels.len()]);
+            self.push_px_at(strip, &vec![0; v.px.len()], v.size, None);
             return;
         }
         if p >= 1.0 {
@@ -1921,10 +2008,10 @@ impl App {
         let (c1, c3) = (1.70158f32, 2.70158f32);
         let back = 1.0 + c3 * (p - 1.0).powi(3) + c1 * (p - 1.0).powi(2);
         let k = (0.6 + 0.4 * back).max(0.05);
-        let blur = ((1.0 - p) * (1.0 - p) * 4.0 * self.scale()).round() as usize;
+        let blur = ((1.0 - p) * (1.0 - p) * 4.0 * v.scale).round() as usize;
         let fade = p * p * (3.0 - 2.0 * p);
-        let px = pop_pixels(&self.pixels, self.size.cx as usize, self.size.cy as usize, k, blur, fade);
-        self.push_px(strip, &px);
+        let px = pop_pixels(&v.px, v.size.cx as usize, v.size.cy as usize, k, blur, fade);
+        self.push_px_at(strip, &px, v.size, None);
     }
 
     /// TIMER_MIRROR_IN: advances the strips popping in or out; a copy that has popped out is
@@ -1972,13 +2059,13 @@ impl App {
             let _ = GetWindowRect(bar, &mut br);
             let dpi = GetDpiForWindow(bar);
             let s = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+            // Its own render: its own size, for its own taskbar's orientation.
+            let Some(size) = self.view(strip).filter(|v| v.size.cx > 0).map(|v| v.size) else { return true };
             if br.bottom - br.top > br.right - br.left {
                 // A vertical taskbar (left / right): like the main one, just above its clock and
-                // centred across its width. The copy is drawn in the main taskbar's layout, so a
-                // vertical copy only fits when the main taskbar is vertical too.
-                if !self.vertical {
-                    let _ = ShowWindow(strip, SW_HIDE);
-                    return false;
+                // centred across its width.
+                if !self.strip_vertical(strip) {
+                    return true; // rendered for a horizontal one: drawn again first
                 }
                 dbg_log(&format!("mirror: vertical bar {bar:?} rect {},{},{},{} main vertical {}", br.left, br.top, br.right, br.bottom, self.vertical));
                 let bottom = match FindWindowExW(Some(bar), None, w!("ClockButton"), None) {
@@ -1997,15 +2084,15 @@ impl App {
                 };
                 let mut p = POINT { x: br.left, y: bottom };
                 let _ = ScreenToClient(bar, &mut p);
-                let mut top = p.y - self.size.cy - (2.0 * s) as i32;
+                let mut top = p.y - size.cy - (2.0 * s) as i32;
                 if self.offset > 0 {
                     top -= (self.offset as f32 * s) as i32;
                 }
                 let mut client = RECT::default();
                 let _ = GetClientRect(bar, &mut client);
-                let left = ((client.right - self.size.cx) / 2).max(0);
+                let left = ((client.right - size.cx) / 2).max(0);
                 self.rooms.borrow_mut().remove(&(bar.0 as isize));
-                self.show_mirror_at(bar, strip, left, top.max(0), self.size);
+                self.show_mirror_at(bar, strip, left, top.max(0), size);
                 return false;
             }
             let right = match FindWindowExW(Some(bar), None, w!("ClockButton"), None) {
@@ -2038,15 +2125,15 @@ impl App {
             } else {
                 let mut p = POINT { x: right, y: br.top };
                 let _ = ScreenToClient(bar, &mut p);
-                let mut left = p.x - self.size.cx - (2.0 * s) as i32;
+                let mut left = p.x - size.cx - (2.0 * s) as i32;
                 if self.offset > 0 {
                     left -= (self.offset as f32 * s) as i32;
                 }
-                avoid_widgets(bar, left, self.size.cx, (4.0 * s) as i32)
+                avoid_widgets(bar, left, size.cx, (4.0 * s) as i32)
             };
             let mut client = RECT::default();
             let _ = GetClientRect(bar, &mut client);
-            let top = ((client.bottom - self.size.cy) / 2).max(0);
+            let top = ((client.bottom - size.cy) / 2).max(0);
             // Narrow the task buttons so they never slide under the copy.
             if let Ok(worker) = FindWindowExW(Some(bar), None, w!("WorkerW"), None) {
                 let mut wr = RECT::default();
@@ -2061,8 +2148,8 @@ impl App {
             let mut x0 = POINT { x: left, y: top };
             let _ = ClientToScreen(bar, &mut x0);
             let age = if self.align_left { ROOM_LEFT_AGE } else { ROOM_AGE };
-            let room = batteryhub::tray_probe::room(bar, br, x0.x, x0.x + self.size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(strip).as_bool()).is_none_or(|r| r)
-                && x0.x + self.size.cx <= right;
+            let room = batteryhub::tray_probe::room(bar, br, x0.x, x0.x + size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(strip).as_bool()).is_none_or(|r| r)
+                && x0.x + size.cx <= right;
             self.rooms.borrow_mut().insert(bar.0 as isize, room);
             if !room {
                 self.mirror_glides.borrow_mut().retain(|g| g.0 != strip);
@@ -2071,7 +2158,7 @@ impl App {
                 }
                 return false;
             }
-            self.show_mirror_at(bar, strip, left, top, self.size);
+            self.show_mirror_at(bar, strip, left, top, size);
         }
         false
     }
@@ -2110,8 +2197,9 @@ impl App {
                     let _ = SetWindowPos(strip, Some(HWND_TOPMOST), sp.x, sp.y, size.cx, size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 } else {
                     // New image, size and place in one step, then shown (on top) if it was hidden.
-                    let px = if strip == self.hovered && self.lit.len() == self.pixels.len() { &self.lit } else { &self.pixels };
-                    self.push_px_at(strip, px, Some(sp));
+                    let Some(v) = self.view(strip) else { return };
+                    let px = if strip == self.hovered && v.lit.len() == v.px.len() { &v.lit } else { &v.px };
+                    self.push_px_at(strip, px, v.size, Some(sp));
                     if hidden {
                         let _ = SetWindowPos(strip, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                     }
@@ -2227,7 +2315,10 @@ impl App {
 
     /// Keeps the strip just left of the notification area (checked every second, like the original).
     fn place(&mut self) {
-        if self.strip.0.is_null() || self.primary_hidden || !self.mirrors_ready {
+        // Waiting for the copies only before the widget first appears (so every taskbar shows it at
+        // the same moment): a shown widget keeps following its place while a copy's is not known
+        // yet (it moved only on the other monitor after a position change).
+        if self.strip.0.is_null() || self.primary_hidden || (!self.mirrors_ready && unsafe { !IsWindowVisible(self.strip).as_bool() }) {
             return;
         }
         unsafe {
@@ -2249,12 +2340,12 @@ impl App {
                 let _ = ScreenToClient(self.taskbar, &mut p);
                 let mut client = RECT::default();
                 let _ = GetClientRect(self.taskbar, &mut client);
-                let mut top = p.y - self.size.cy - (2.0 * self.scale()) as i32;
+                let mut top = p.y - self.mv.size.cy - (2.0 * self.scale()) as i32;
                 if self.offset > 0 {
                     top -= (self.offset as f32 * self.scale()) as i32;
                 }
                 let top = top.max(0);
-                let left = ((client.right - self.size.cx) / 2).max(0);
+                let left = ((client.right - self.mv.size.cx) / 2).max(0);
                 self.rooms.borrow_mut().remove(&(self.taskbar.0 as isize));
                 self.place_strip_at(left, top, (tr, bar, top));
                 return;
@@ -2275,17 +2366,17 @@ impl App {
             } else {
                 let mut p = POINT { x: tr.left, y: bar.top };
                 let _ = ScreenToClient(self.taskbar, &mut p);
-                let mut left = p.x - self.size.cx - (2.0 * self.scale()) as i32;
+                let mut left = p.x - self.mv.size.cx - (2.0 * self.scale()) as i32;
                 // Optional extra gap (DPI-independent px), e.g. to sit next to another taskbar widget.
                 if self.offset > 0 {
                     left -= (self.offset as f32 * self.scale()) as i32;
                 }
                 // Other programs' widgets in the taskbar: sit left of them instead of on top.
-                avoid_widgets(self.taskbar, left, self.size.cx, (4.0 * self.scale()) as i32)
+                avoid_widgets(self.taskbar, left, self.mv.size.cx, (4.0 * self.scale()) as i32)
             };
             let mut client = RECT::default();
             let _ = GetClientRect(self.taskbar, &mut client);
-            let top = ((client.bottom - self.size.cy) / 2).max(0);
+            let top = ((client.bottom - self.mv.size.cy) / 2).max(0);
 
             // Windows 10 / ExplorerPatcher taskbar: narrow the task buttons so they never slide under us.
             if let Ok(rebar) = FindWindowExW(Some(self.taskbar), None, w!("ReBarWindow32"), None).map_err(|_| ()).and_then(|r| if self.align_left { Err(()) } else { Ok(r) }) {
@@ -2301,8 +2392,8 @@ impl App {
             let mut x0 = POINT { x: left, y: top };
             let _ = ClientToScreen(self.taskbar, &mut x0);
             let age = if self.align_left { ROOM_LEFT_AGE } else { ROOM_AGE };
-            let room = batteryhub::tray_probe::room(self.taskbar, bar, x0.x, x0.x + self.size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(self.strip).as_bool()).is_none_or(|r| r)
-                && x0.x + self.size.cx <= tr.left;
+            let room = batteryhub::tray_probe::room(self.taskbar, bar, x0.x, x0.x + self.mv.size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(self.strip).as_bool()).is_none_or(|r| r)
+                && x0.x + self.mv.size.cx <= tr.left;
             self.rooms.borrow_mut().insert(self.taskbar.0 as isize, room);
             if !room {
                 self.glide = None;
@@ -2325,16 +2416,16 @@ impl App {
                 let hidden = !IsWindowVisible(self.strip).as_bool();
                 let mut cur = RECT::default();
                 let _ = GetWindowRect(self.strip, &mut cur);
-                let moved = cur.left != sp.x || cur.top != sp.y || cur.right - cur.left != self.size.cx || cur.bottom - cur.top != self.size.cy;
+                let moved = cur.left != sp.x || cur.top != sp.y || cur.right - cur.left != self.mv.size.cx || cur.bottom - cur.top != self.mv.size.cy;
                 if !hidden && !moved && self.last_place == key {
                     return;
                 }
                 self.last_place = key;
                 if self.popping(self.strip) {
-                    let _ = SetWindowPos(self.strip, Some(HWND_TOPMOST), sp.x, sp.y, self.size.cx, self.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    let _ = SetWindowPos(self.strip, Some(HWND_TOPMOST), sp.x, sp.y, self.mv.size.cx, self.mv.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 } else {
-                    let px = if self.strip == self.hovered && self.lit.len() == self.pixels.len() { &self.lit } else { &self.pixels };
-                    self.push_px_at(self.strip, px, Some(sp));
+                    let px = if self.strip == self.hovered && self.mv.lit.len() == self.mv.px.len() { &self.mv.lit } else { &self.mv.px };
+                    self.push_px_at(self.strip, px, self.mv.size, Some(sp));
                     if hidden {
                         let _ = SetWindowPos(self.strip, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                     }
@@ -2360,7 +2451,7 @@ impl App {
             let _ = GetWindowRect(self.strip, &mut cur);
             let mut from = POINT { x: cur.left, y: cur.top };
             let _ = ScreenToClient(self.taskbar, &mut from);
-            let same_size = cur.right - cur.left == self.size.cx && cur.bottom - cur.top == self.size.cy;
+            let same_size = cur.right - cur.left == self.mv.size.cx && cur.bottom - cur.top == self.mv.size.cy;
             let visible = IsWindowVisible(self.strip).as_bool();
             let raise = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
             if visible && same_size && self.glide.is_some_and(|g| g.1 == to) {
@@ -2374,7 +2465,7 @@ impl App {
                 return;
             }
             self.glide = None;
-            let _ = SetWindowPos(self.strip, Some(HWND_TOP), left, top, self.size.cx, self.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let _ = SetWindowPos(self.strip, Some(HWND_TOP), left, top, self.mv.size.cx, self.mv.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
     }
 
@@ -2407,8 +2498,10 @@ impl App {
             }
             let e = glide_ease(t0);
             let at = POINT { x: from.x + ((to.x - from.x) as f32 * e).round() as i32, y: from.y + ((to.y - from.y) as f32 * e).round() as i32 };
-            let px = if strip == self.hovered && self.lit.len() == self.pixels.len() { &self.lit } else { &self.pixels };
-            self.push_px_at(strip, px, Some(at));
+            if let Some(v) = self.view(strip) {
+                let px = if strip == self.hovered && v.lit.len() == v.px.len() { &v.lit } else { &v.px };
+                self.push_px_at(strip, px, v.size, Some(at));
+            }
             if e < 1.0 {
                 going.push((strip, from, to, t0));
             }
@@ -2865,7 +2958,8 @@ impl App {
             let _ = GetMonitorInfoW(MonitorFromWindow(strip, MONITOR_DEFAULTTONEAREST), &mut mi);
             let gap = (8.0 * self.scale()) as i32;
             let work = mi.rcWork;
-            let (x, y, slide) = if self.vertical {
+            let vertical = self.strip_vertical(strip);
+            let (x, y, slide) = if vertical {
                 // Beside the taskbar, level with the hovered device (no slide: it fades in).
                 let mid = (mi.rcMonitor.left + mi.rcMonitor.right) / 2;
                 let x = if rc.left < mid { rc.right + gap } else { rc.left - w - gap };
@@ -2913,7 +3007,7 @@ impl App {
                 content: Some(content),
                 prev,
                 drawn: old.drawn,
-                vertical: self.vertical,
+                vertical,
                 prev_y,
                 drawn_y: old.drawn_y,
                 prev_h,
@@ -3199,12 +3293,13 @@ impl App {
         if MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
+        let vertical = self.strip_vertical(on);
         if self.drag.is_some() {
-            self.drag_to(if self.vertical { y } else { x });
+            self.drag_to(if vertical { y } else { x });
             return;
         }
-        let x = if self.vertical { y } else { x };
-        let hit = self.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| (h.2, h.0, h.1));
+        let x = if vertical { y } else { x };
+        let hit = self.view(on).and_then(|v| v.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| (h.2, h.0, h.1)));
         let mode = hit.and_then(|h| self.visible_at(h.0)).map_or(settings::HoverMode::Card, |d| settings::hover_mode(SETTINGS_KEY, &d.key));
         // The hover highlight (like Windows' own taskbar buttons) in every mode, "Nothing" included.
         let _ = mode;
@@ -3264,7 +3359,7 @@ impl App {
             let mut rc = RECT::default();
             let _ = GetWindowRect(strip, &mut rc);
             let gap = (4.0 * self.scale()) as i32;
-            let (cx, cy) = if self.vertical {
+            let (cx, cy) = if self.strip_vertical(strip) {
                 let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
                 let _ = GetMonitorInfoW(MonitorFromWindow(strip, MONITOR_DEFAULTTONEAREST), &mut mi);
                 let left_side = rc.left < (mi.rcMonitor.left + mi.rcMonitor.right) / 2;
@@ -3550,34 +3645,35 @@ impl App {
     /// Where each device is drawn along the strip this frame: (offset from its place, blur radius,
     /// opacity 0-255). The dragged device follows the mouse; devices that changed places slide
     /// from where they were drawn, blurred while they move, like the card's contents.
-    fn motion(&mut self, keys: &[String], ranges: &[(i32, i32)], len: i32, s: f32) -> Vec<(i32, i32, u32)> {
+    fn motion(&self, v: &mut View, keys: &[String], ranges: &[(i32, i32)], len: i32, s: f32, drag_here: bool) -> Vec<(i32, i32, u32)> {
         let now = Instant::now();
-        if std::mem::take(&mut self.reordered) {
+        let held = |k: &str| drag_here && self.drag.as_deref() == Some(k);
+        if std::mem::take(&mut v.reordered) {
             for (k, r) in keys.iter().zip(ranges) {
-                if self.drag.as_deref() == Some(k.as_str()) {
+                if held(k) {
                     continue;
                 }
-                if let Some(&was) = self.drawn_at.get(k) {
+                if let Some(&was) = v.drawn_at.get(k) {
                     // Positions are kept from the end of the strip (it is anchored there).
                     let d = (len as f32 - was) - r.0 as f32;
                     if d.abs() >= 1.0 {
-                        self.slides.insert(k.clone(), (d, now));
+                        v.slides.insert(k.clone(), (d, now));
                     }
                 }
             }
         }
-        self.slides.retain(|_, (_, t0)| (t0.elapsed().as_secs_f32() * 1000.0) < SLIDE_MS);
+        v.slides.retain(|_, (_, t0)| (t0.elapsed().as_secs_f32() * 1000.0) < SLIDE_MS);
         let mut out = Vec::with_capacity(keys.len());
-        self.starts.clear();
-        let before = std::mem::take(&mut self.drawn_at);
-        self.strip_len = len;
+        v.starts.clear();
+        let before = std::mem::take(&mut v.drawn_at);
+        v.strip_len = len;
         for (k, r) in keys.iter().zip(ranges) {
-            let (off, blur, alpha) = if self.drag.as_deref() == Some(k.as_str()) {
+            let (off, blur, alpha) = if held(k) {
                 // Held by the mouse, kept on the strip.
                 let want = self.drag_at - self.grab;
                 let at = want.clamp(0, (len - (r.1 - r.0)).max(0));
                 (at - r.0, 0, 200)
-            } else if let Some((d, t0)) = self.slides.get(k) {
+            } else if let Some((d, t0)) = v.slides.get(k) {
                 let p: f32 = (t0.elapsed().as_secs_f32() * 1000.0 / SLIDE_MS).clamp(0.0, 1.0);
                 let left = (1.0f32 - p).powi(3); // ease-out: what is left of the way
                 let off = (d * left).round() as i32;
@@ -3593,28 +3689,24 @@ impl App {
             } else {
                 (0, 0, 255)
             };
-            self.starts.insert(k.clone(), r.0);
-            self.drawn_at.insert(k.clone(), (len - (r.0 + off)) as f32);
+            v.starts.insert(k.clone(), r.0);
+            v.drawn_at.insert(k.clone(), (len - (r.0 + off)) as f32);
             out.push((off, blur, alpha));
-        }
-        unsafe {
-            if self.slides.is_empty() && self.presence.is_empty() {
-                let _ = KillTimer(Some(self.main), TIMER_SLIDE);
-            } else {
-                SetTimer(Some(self.main), TIMER_SLIDE, 15, None);
-            }
         }
         out
     }
 
     /// Left button down on a strip: the device under the mouse can be dragged to another place.
     fn start_drag(&mut self, strip: HWND, x: i32, y: i32) {
-        let x = if self.vertical { y } else { x };
-        let Some(i) = self.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| h.2) else { return };
+        let Some(v) = self.view(strip) else { return };
+        let x = if v.vertical { y } else { x };
+        let Some(i) = v.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| h.2) else { return };
         let Some(key) = self.visible_at(i).map(|d| d.key.clone()) else { return };
+        let start = v.starts.get(&key).copied().unwrap_or(x);
         self.drag_at = x;
-        self.grab = x - self.starts.get(&key).copied().unwrap_or(x);
+        self.grab = x - start;
         self.drag = Some(key);
+        self.drag_on = strip;
         unsafe {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(strip);
         }
@@ -3628,8 +3720,9 @@ impl App {
         }
         self.drag_at = x;
         self.hide_tip();
-        let hit = self.hits.iter().find(|h| x >= h.0 && x < h.1).copied();
-        let mine = self.hits.iter().position(|h| self.visible_at(h.2).is_some_and(|d| d.key == key));
+        let hits = self.view(self.drag_on).map(|v| v.hits.clone()).unwrap_or_default();
+        let hit = hits.iter().find(|h| x >= h.0 && x < h.1).copied();
+        let mine = hits.iter().position(|h| self.visible_at(h.2).is_some_and(|d| d.key == key));
         if let (Some((from, to, i)), Some(j)) = (hit, mine)
             && let Some(other) = self.visible_at(i).map(|d| d.key.clone())
             && other != key
@@ -3637,7 +3730,7 @@ impl App {
             // Past the middle of the other device: it makes room (no flicker between two of
             // different widths).
             let mid = (from + to) / 2;
-            let k = self.hits.iter().position(|h| h.2 == i).unwrap_or(j);
+            let k = hits.iter().position(|h| h.2 == i).unwrap_or(j);
             if (k > j && x >= mid) || (k < j && x <= mid) {
                 self.move_device(&key, &other);
                 return;
@@ -3652,10 +3745,13 @@ impl App {
                 let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
             }
             // Let go: the device slides into its place.
-            if let (Some(&from_end), Some(&place)) = (self.drawn_at.get(&key), self.starts.get(&key)) {
-                let d = (self.strip_len as f32 - from_end) - place as f32;
+            let on = self.drag_on;
+            if let Some(v) = self.view_mut(on)
+                && let (Some(&from_end), Some(&place)) = (v.drawn_at.get(&key), v.starts.get(&key))
+            {
+                let d = (v.strip_len as f32 - from_end) - place as f32;
                 if d.abs() >= 1.0 {
-                    self.slides.insert(key, (d, Instant::now()));
+                    v.slides.insert(key, (d, Instant::now()));
                 }
             }
             self.paint();
