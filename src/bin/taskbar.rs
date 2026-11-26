@@ -368,6 +368,8 @@ struct App {
     views: HashMap<isize, View>,
     /// Fonts for the other monitors' DPI scales (the main one's are `fonts`).
     fonts_more: Vec<Fonts>,
+    /// Icon fonts of the ring style, per DPI scale.
+    ring_fonts: Vec<(f32, HFONT)>,
     /// Strip the device being dragged belongs to.
     drag_on: HWND,
     /// Widget position (SIDE_*) and, for SIDE_FREE, its left edge (px at 100 %, from the
@@ -469,6 +471,8 @@ struct App {
     rooms: RefCell<HashMap<isize, bool>>,
     /// No taskbar the widget is shown on has room: the levels are notification-area icons.
     crowded: bool,
+    /// Devices whose last reading dropped to 0 % at once, not yet confirmed (see doubt_zero).
+    zero_once: HashSet<String>,
     /// Phones with "Rising level means charging": (last level, charging as worked out, when the
     /// level last changed).
     rising: HashMap<String, (i32, bool, Instant)>,
@@ -1165,27 +1169,32 @@ fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
             }
         }
     }
-    // Centred by its ink, not its font box (glyphs sit off-centre in their cell).
-    let ink = |i: usize| icon.a[i] > 24;
+    // Centred by its ink, not its font box (glyphs sit off-centre in their cell), to a fraction of
+    // a pixel: the icon is resampled at the offset that puts the middle of its ink in the middle
+    // of the ring.
     let (mut x0, mut y0, mut x1, mut y1) = (icon.w, icon.h, -1, -1);
     for yy in 0..icon.h {
         for xx in 0..icon.w {
-            if ink((yy * icon.w + xx) as usize) {
+            if icon.a[(yy * icon.w + xx) as usize] > 8 {
                 (x0, y0, x1, y1) = (x0.min(xx), y0.min(yy), x1.max(xx), y1.max(yy));
             }
         }
     }
-    let (ox, oy) = if x1 >= x0 {
-        (((d - (x1 - x0 + 1)) as f32 / 2.0).round() as i32 - x0, ((d - (y1 - y0 + 1)) as f32 / 2.0).round() as i32 - y0)
-    } else {
-        ((d - icon.w) / 2, (d - icon.h) / 2)
-    };
-    for yy in 0..icon.h {
-        for xx in 0..icon.w {
-            let (tx, ty) = (ox + xx, oy + yy);
-            if (0..d).contains(&tx) && (0..d).contains(&ty) {
+    if x1 >= x0 {
+        let (mx, my) = ((x0 + x1 + 1) as f32 / 2.0, (y0 + y1 + 1) as f32 / 2.0);
+        let (ox, oy) = (c - mx, c - my);
+        let at = |x: i32, y: i32| if (0..icon.w).contains(&x) && (0..icon.h).contains(&y) { icon.a[(y * icon.w + x) as usize] as f32 } else { 0.0 };
+        for ty in 0..d {
+            for tx in 0..d {
+                // Bilinear sample of the icon at this ring pixel.
+                let (sx, sy) = (tx as f32 - ox, ty as f32 - oy);
+                let (fx, fy) = (sx.floor(), sy.floor());
+                let (ax, ay) = (sx - fx, sy - fy);
+                let (ix, iy) = (fx as i32, fy as i32);
+                let v = at(ix, iy) * (1.0 - ax) * (1.0 - ay) + at(ix + 1, iy) * ax * (1.0 - ay) + at(ix, iy + 1) * (1.0 - ax) * ay + at(ix + 1, iy + 1) * ax * ay;
                 let i = (ty * d + tx) as usize;
-                base[i] = base[i].max(icon.a[(yy * icon.w + xx) as usize]);
+                // A little stronger: the small icon's one-pixel strokes looked grey.
+                base[i] = base[i].max((v * 1.4).round().min(255.0) as u8);
             }
         }
     }
@@ -1423,6 +1432,16 @@ impl App {
         self.fonts_more.iter().find(|f| f.scale == s).map(|f| (f.icons, f.bolt, f.text)).unwrap_or_default()
     }
 
+    /// Icon font of the ring style for DPI scale `s` (kept per scale).
+    fn ring_font(&mut self, s: f32) -> HFONT {
+        if let Some(&(_, f)) = self.ring_fonts.iter().find(|(k, _)| *k == s) {
+            return f;
+        }
+        let f = make_font((13.0 * s).round() as i32, 400, "Segoe Fluent Icons", "Segoe MDL2 Assets", 0);
+        self.ring_fonts.push((s, f));
+        f
+    }
+
     /// The pieces of every item (icon, level, bolt) drawn for DPI scale `s`.
     fn pieces(&mut self, items: &[Item], s: f32, vertical: bool) -> Vec<Piece> {
         let px = |v: f32| (v * s).round() as i32;
@@ -1431,6 +1450,8 @@ impl App {
         let fg = if light { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
         let red = ui::low_color(light);
         let (icons, bolt, text) = self.strip_fonts(s);
+        // Ring style: the icon a size between the strip's icons and the bolt, to fit inside the ring.
+        let ring_font = if self.ring { self.ring_font(s) } else { bolt };
         let mut pieces: Vec<Piece> = Vec::new();
         for (i, it) in items.iter().enumerate() {
             let Some(d) = &it.dev else {
@@ -1462,7 +1483,7 @@ impl App {
                 // Ring style: the icon inside a ring filled clockwise to the level, green while
                 // charging, blue when full, red when low, else in the icon's colour.
                 let ring_color = bolt_color.unwrap_or(if low { red } else { own });
-                let (base, arc) = ring_masks(&device_icon(d, bolt, light), px(28.0), (2.5 * s).max(2.0), d.percent);
+                let (base, arc) = ring_masks(&device_icon(d, ring_font, light), px(28.0), (2.5 * s).max(2.0), d.percent);
                 let mut p = Piece::new(Some(i), base, icon_tint(low), alpha, 0);
                 p.second = Some((arc, ring_color));
                 p.glow = glow;
@@ -3897,7 +3918,8 @@ impl App {
 
     /// Adds / updates the devices of a read; devices reporting "off" are removed and their
     /// receiver is remembered for quick checks.
-    fn merge(&mut self, fresh: Vec<DeviceStatus>) {
+    fn merge(&mut self, mut fresh: Vec<DeviceStatus>) {
+        self.doubt_zero(&mut fresh);
         self.record_history(&fresh);
         self.remember_devices(&fresh);
         let now = Instant::now();
@@ -4198,6 +4220,25 @@ impl App {
         self.card_cache.clear();
         batteryhub::dashboard::notify_history_changed();
         dbg_log(&format!("measurements of {key} deleted"));
+    }
+
+    /// A level that drops to 0 % at once from more than a few percent is a misread more often than
+    /// an empty battery (e.g. a headset's status report while it wakes up: 64 %, 0 %, 64 % three
+    /// seconds later): it is shown and recorded only when the next reading says 0 % too; until then
+    /// the level before it stays.
+    fn doubt_zero(&mut self, fresh: &mut [DeviceStatus]) {
+        for s in fresh.iter_mut() {
+            if !s.connected || s.percent != 0 {
+                self.zero_once.remove(&s.key);
+                continue;
+            }
+            let before = self.devices.get(&s.key).map(|t| t.status.percent).unwrap_or(-1);
+            if before > 5 && self.zero_once.insert(s.key.clone()) {
+                s.percent = before;
+            } else {
+                self.zero_once.remove(&s.key);
+            }
+        }
     }
 
     /// Phones with "Rising level means charging" (experimental): a level above the last one marks
