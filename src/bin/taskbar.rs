@@ -1165,7 +1165,21 @@ fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
             }
         }
     }
-    let (ox, oy) = ((d - icon.w) / 2, (d - icon.h) / 2);
+    // Centred by its ink, not its font box (glyphs sit off-centre in their cell).
+    let ink = |i: usize| icon.a[i] > 24;
+    let (mut x0, mut y0, mut x1, mut y1) = (icon.w, icon.h, -1, -1);
+    for yy in 0..icon.h {
+        for xx in 0..icon.w {
+            if ink((yy * icon.w + xx) as usize) {
+                (x0, y0, x1, y1) = (x0.min(xx), y0.min(yy), x1.max(xx), y1.max(yy));
+            }
+        }
+    }
+    let (ox, oy) = if x1 >= x0 {
+        (((d - (x1 - x0 + 1)) as f32 / 2.0).round() as i32 - x0, ((d - (y1 - y0 + 1)) as f32 / 2.0).round() as i32 - y0)
+    } else {
+        ((d - icon.w) / 2, (d - icon.h) / 2)
+    };
     for yy in 0..icon.h {
         for xx in 0..icon.w {
             let (tx, ty) = (ox + xx, oy + yy);
@@ -1448,7 +1462,7 @@ impl App {
                 // Ring style: the icon inside a ring filled clockwise to the level, green while
                 // charging, blue when full, red when low, else in the icon's colour.
                 let ring_color = bolt_color.unwrap_or(if low { red } else { own });
-                let (base, arc) = ring_masks(&device_icon(d, bolt, light), px(24.0), (2.5 * s).max(2.0), d.percent);
+                let (base, arc) = ring_masks(&device_icon(d, bolt, light), px(28.0), (2.5 * s).max(2.0), d.percent);
                 let mut p = Piece::new(Some(i), base, icon_tint(low), alpha, 0);
                 p.second = Some((arc, ring_color));
                 p.glow = glow;

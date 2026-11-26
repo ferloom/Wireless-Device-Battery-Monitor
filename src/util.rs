@@ -88,6 +88,11 @@ pub fn sleep_ms(ms: u64) {
 
 /// Diagnostic line in `%TEMP%\bh2.log`, only when BatteryHub runs with the BH_DEBUG environment
 /// variable set (the same file the taskbar program logs to).
+/// BH_DEBUG is set (debug_log writes).
+pub fn debug_on() -> bool {
+    std::env::var_os("BH_DEBUG").is_some()
+}
+
 pub fn debug_log(msg: impl FnOnce() -> String) {
     if std::env::var_os("BH_DEBUG").is_some() {
         use std::io::Write;

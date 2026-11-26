@@ -237,9 +237,25 @@ pub fn room(bar: HWND, bar_rect: RECT, x0: i32, x1: i32, notify: HWND, msg: u32,
     }
     if shown {
         crate::util::debug_log(|| format!("room {x0}..{x1}: no room, covers {blockers:?}"));
+    } else {
+        // Hidden for lack of room: checked again every few seconds (not only after `max_age`), so
+        // something that covered the place only for a moment doesn't hide the widget for a minute.
+        let key = bar.0 as isize;
+        let generation = LEFT_GEN.load(Ordering::SeqCst);
+        let checked = LEFT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&key)).map(|e| (e.at.elapsed(), e.generation));
+        if let Some((age, g)) = checked
+            && age > ROOM_HIDDEN_RECHECK
+            && g == generation
+        {
+            left_refresh_soon();
+            let _ = items(bar, bar_rect, notify, msg, max_age);
+        }
     }
     Some(false)
 }
+
+/// How often a widget hidden for lack of room checks again whether it fits (see `room`).
+const ROOM_HIDDEN_RECHECK: Duration = Duration::from_secs(5);
 
 /// How recent a "no room" answer must be to hide a widget that is shown (see `room`).
 const ROOM_CONFIRM: Duration = Duration::from_secs(3);
@@ -267,8 +283,9 @@ fn items(bar: HWND, bar_rect: RECT, notify: HWND, msg: u32, max_age: Duration) -
     if start {
         let notify = notify.0 as isize;
         std::thread::spawn(move || {
-            let mut items = probe_items(key).unwrap_or_default();
-            items.sort();
+            let mut labelled = probe_items(key).unwrap_or_default();
+            labelled.sort();
+            let items: Vec<(i32, i32)> = labelled.iter().map(|&(l, r, _)| (l, r)).collect();
             let changed = {
                 let mut g = LEFT.lock().unwrap_or_else(|e| e.into_inner());
                 let m = g.get_or_insert_with(HashMap::new);
@@ -280,6 +297,7 @@ fn items(bar: HWND, bar_rect: RECT, notify: HWND, msg: u32, max_age: Duration) -
                 b.remove(&key);
             }
             if changed {
+                crate::util::debug_log(|| format!("taskbar {key:X} items: {labelled:?}"));
                 unsafe {
                     let _ = PostMessageW(Some(HWND(notify as *mut _)), msg, WPARAM(0), LPARAM(0));
                 }
@@ -310,10 +328,10 @@ pub fn left_chain_end(items: &[(i32, i32)], bar_left: i32, bar_h: i32) -> i32 {
 
 /// The taskbar's own items (buttons), as (left, right) in screen x: not the notification area,
 /// not containers spanning a large part of the taskbar, and not BatteryHub's own windows.
-fn probe_items(bar: isize) -> Option<Vec<(i32, i32)>> {
+fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
     unsafe {
         let init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let found = (|| -> windows::core::Result<Vec<(i32, i32)>> {
+        let found = (|| -> windows::core::Result<Vec<(i32, i32, String)>> {
             let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
             let root = uia.ElementFromHandle(HWND(bar as *mut _))?;
             let rb = root.CurrentBoundingRectangle()?;
@@ -328,10 +346,21 @@ fn probe_items(bar: isize) -> Option<Vec<(i32, i32)>> {
                 }
                 let id = e.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
                 let class = e.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
+                // Our own widget (whatever its class reads as) never counts as something in its way.
+                if e.CurrentProcessId().is_ok_and(|p| p as u32 == std::process::id()) {
+                    continue;
+                }
                 if id == TRAY_ID || class.starts_with("BatteryHub") || matches!(class.as_str(), "TrayNotifyWnd" | "ReBarWindow32" | "MSTaskSwWClass" | "MSTaskListWClass") {
                     continue;
                 }
-                out.push((b.left, b.right));
+                // Class / automation id / name: what covered the widget, in the log (BH_DEBUG).
+                let label = if crate::util::debug_on() {
+                    let name = e.CurrentName().map(|s| s.to_string()).unwrap_or_default();
+                    format!("{class}/{id}/{}", name.chars().take(30).collect::<String>())
+                } else {
+                    String::new()
+                };
+                out.push((b.left, b.right, label));
             }
             Ok(out)
         })();
