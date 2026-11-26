@@ -390,6 +390,12 @@ struct App {
     moving: Option<(HWND, i32, Layout)>,
     /// Strip the right-click menu was opened on (its widget's settings are the ones changed).
     menu_on: HWND,
+    /// Copies that lost their room during placement: they pop out (place_mirror_at).
+    pop_out: RefCell<Vec<HWND>>,
+    /// Taskbars without room for the widget, and when each was last said (one notification per
+    /// monitor, at most every 10 minutes).
+    short_bars: HashSet<isize>,
+    short_said: HashMap<isize, Instant>,
     last_place: (RECT, RECT, i32),
     /// Main strip uses a topmost popup owned by `Shell_TrayWnd` (e.g. when Start11's SDTaskbar
     /// sits inside `Shell_TrayWnd` and fights child-window Z-order).
@@ -2198,6 +2204,23 @@ impl App {
             let rooms = self.rooms.borrow();
             !bars.is_empty() && bars.iter().all(|b| rooms.get(b) == Some(&false))
         };
+        // One taskbar without room while others have it: said for that monitor.
+        let short: HashSet<isize> = {
+            let rooms = self.rooms.borrow();
+            bars.iter().filter(|b| rooms.get(b) == Some(&false)).copied().collect()
+        };
+        if !crowded {
+            let new: Vec<isize> = short.iter().filter(|b| !self.short_bars.contains(b)).copied().collect();
+            for b in new {
+                if self.short_said.get(&b).is_none_or(|t| t.elapsed().as_secs() >= 600) {
+                    self.short_said.insert(b, Instant::now());
+                    let label = monitor_label(HWND(b as *mut c_void));
+                    dbg_log(&format!("not enough room on {label}"));
+                    self.notify_info(&trf("Not enough room on the taskbar of {monitor}", &[("monitor", &label)]), &tr(SHORT_ROOM_TEXT));
+                }
+            }
+        }
+        self.short_bars = short;
         if crowded == self.crowded {
             return;
         }
@@ -2417,7 +2440,18 @@ impl App {
         let (bar, strip) = self.mirrors[i];
         let was = unsafe { IsWindowVisible(strip).as_bool() };
         let pending = self.place_mirror(bar, strip);
-        if !was && unsafe { IsWindowVisible(strip).as_bool() } {
+        let out = std::mem::take(&mut *self.pop_out.borrow_mut());
+        if out.contains(&strip) {
+            // No room on its taskbar any more: pops out, then hides.
+            if !self.leaving(strip) {
+                self.start_pop(strip, true);
+            }
+            return pending;
+        }
+        if self.leaving(strip) && unsafe { IsWindowVisible(strip).as_bool() } {
+            // Room again while it was popping out: it turns around.
+            self.start_pop(strip, false);
+        } else if !was && unsafe { IsWindowVisible(strip).as_bool() } {
             self.start_pop(strip, false);
         } else if !self.popping(strip) && unsafe { IsWindowVisible(strip).as_bool() } {
             // What a copy shows right after it appears can get lost on the way to the screen (it
@@ -2425,6 +2459,11 @@ impl App {
             self.push(strip);
         }
         pending
+    }
+
+    /// A strip is popping out.
+    fn leaving(&self, strip: HWND) -> bool {
+        self.mirror_in.iter().any(|(h, _, l)| *h == strip && *l)
     }
 
     /// A strip is popping in or out (its frames come from TIMER_MIRROR_IN).
@@ -2488,7 +2527,8 @@ impl App {
                 self.mirror_in.push((strip, t0, leaving));
             } else if leaving {
                 unsafe {
-                    if strip == self.strip || self.parked.iter().any(|m| m.1 == strip) {
+                    // The main strip, a parked copy and a copy hidden for lack of room wait hidden.
+                    if strip == self.strip || self.parked.iter().any(|m| m.1 == strip) || self.mirrors.iter().any(|m| m.1 == strip) {
                         let _ = ShowWindow(strip, SW_HIDE);
                         self.push(strip); // full content again for its next appearance
                     } else if is_our_strip(strip) && !self.mirrors.iter().any(|m| m.1 == strip) {
@@ -2600,8 +2640,9 @@ impl App {
             self.rooms.borrow_mut().insert(bar.0 as isize, room);
             if !room {
                 self.mirror_glides.borrow_mut().retain(|g| g.0 != strip);
+                // Pops out (place_mirror_at starts it), then hides.
                 if IsWindowVisible(strip).as_bool() {
-                    let _ = ShowWindow(strip, SW_HIDE);
+                    self.pop_out.borrow_mut().push(strip);
                 }
                 return false;
             }
@@ -2827,13 +2868,23 @@ impl App {
             if !room {
                 self.glide = None;
                 self.last_place = Default::default();
-                if IsWindowVisible(self.strip).as_bool() {
+                // Pops out (the same animation as everywhere else), then hides.
+                if IsWindowVisible(self.strip).as_bool() && !self.leaving(self.strip) {
                     self.hide_tip();
-                    let _ = ShowWindow(self.strip, SW_HIDE);
+                    self.start_pop(self.strip, true);
                 }
                 return;
             }
+            // Room again: one popping out turns around; a hidden one pops in once shown.
+            let strip = self.strip;
+            if self.leaving(strip) {
+                self.start_pop(strip, false);
+            }
+            let was = IsWindowVisible(strip).as_bool();
             self.place_strip_at(left, top, (tr, bar, left));
+            if !was && IsWindowVisible(strip).as_bool() && !self.popping(strip) {
+                self.start_pop(strip, false);
+            }
         }
     }
 
@@ -5650,6 +5701,9 @@ fn glide_ease(t0: Instant) -> f32 {
 
 
 /// "Reset measurements": asks first, then deletes the device's history.
+const SHORT_ROOM_TEXT: &str = n_(
+    "The widget is hidden on that taskbar until there is room again. You can also move it: right-click it → Widget position."
+);
 const MIRROR_ON_TEXT: &str = n_("Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution).");
 const MIRROR_OFF_TEXT: &str = n_("Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now.");
 
