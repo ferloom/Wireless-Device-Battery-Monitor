@@ -142,7 +142,6 @@ const CARD_AWAY_MS: u128 = 300;
 const CARD_CROSS_MS: f32 = 130.0;
 /// Strongest blur of the card's content during its animations (px at 100 % scaling).
 const BLUR_MAX: f32 = 6.0;
-const TIMER_PRESS_FEEDBACK: usize = 8;
 /// Automatic update check this long after start-up; when the network is not up yet (e.g. right
 /// at sign-in) it is tried again every AUTO_UPDATE_RETRY_MS, at most AUTO_UPDATE_RETRIES times.
 const AUTO_UPDATE_DELAY_MS: u32 = 2_000;
@@ -307,6 +306,8 @@ struct App {
     main: HWND,
     finder: Option<myfinder::FinderField>,
     pressed_strip: HWND,
+    menu_strip: HWND,
+    press_release: u32,
     strip: HWND,
     taskbar: HWND,
     devices: BTreeMap<String, Tracked>,
@@ -1385,10 +1386,17 @@ impl App {
         if strip.0.is_null() || px.len() != (w * h) as usize {
             return;
         }
-        let pixels = if self.pressed_strip == strip {
-            std::borrow::Cow::Owned(px.iter().map(|&p| {
-                (0..4).fold(0, |out, i| out | ((((p >> (i * 8)) & 255) * 55 / 100) << (i * 8)))
-            }).collect::<Vec<_>>())
+        let pixels = if self.menu_strip == strip {
+            let light = self.painted_for.2;
+            let mut plate = Canvas { w, h, px: vec![0; px.len()] };
+            let color = if light { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
+            plate.round_rect(1, (h / 4).clamp(2, 8), color, if light { 42 } else { 56 });
+            for (under, &over) in plate.px.iter_mut().zip(px) {
+                let inverse = 255 - (over >> 24);
+                let channel = |shift: u32| ((over >> shift) & 255u32) + ((*under >> shift) & 255u32) * inverse / 255u32;
+                *under = channel(24) << 24 | channel(16) << 16 | channel(8) << 8 | channel(0);
+            }
+            std::borrow::Cow::Owned(plate.px)
         } else {
             std::borrow::Cow::Borrowed(px)
         };
@@ -4214,9 +4222,16 @@ unsafe fn show_menu(from: Option<HWND>) {
             ui::set_menu_theme(owner, dark);
             // Drawn like Windows 11's own context menus (rows, icons, highlight, chevrons).
             let _modern = ui::ModernMenu::apply(menu, &icons, owner, dark);
+            if let Some(strip) = from.filter(|&strip| is_our_strip(strip)) {
+                with_app(|a| { a.menu_strip = strip; a.push(strip); });
+            }
             MENU_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
             let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, None, owner, None);
             MENU_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
+            with_app(|a| {
+                let strip = std::mem::take(&mut a.menu_strip);
+                if is_our_strip(strip) { a.push(strip); }
+            });
             // Whatever the mouse crossed while the menu was open does not open the card.
             with_app(|a| a.hide_tip());
             let _ = PostMessageW(Some(main), WM_NULL, WPARAM(0), LPARAM(0));
@@ -4770,6 +4785,15 @@ extern "system" fn card_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
     }
 }
 
+fn clear_strip_press(hwnd: HWND) {
+    with_app(|a| {
+        if a.pressed_strip == hwnd {
+            a.pressed_strip = HWND::default();
+            a.press_release = 0;
+        }
+    });
+}
+
 extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -4801,26 +4825,24 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             }
             action @ (WM_LBUTTONDOWN | WM_RBUTTONDOWN) if action == WM_RBUTTONDOWN || with_app(|a| a.finder.is_some()).unwrap_or(false) => {
                 with_app(|a| {
-                    let previous = std::mem::replace(&mut a.pressed_strip, hwnd);
-                    if previous != hwnd && !previous.0.is_null() { a.push(previous); }
+                    a.pressed_strip = hwnd;
+                    a.press_release = if action == WM_RBUTTONDOWN { WM_RBUTTONUP } else { WM_LBUTTONUP };
                     a.hide_tip();
-                    a.push(hwnd);
                 });
-                SetTimer(Some(hwnd), TIMER_PRESS_FEEDBACK, 140, None);
+                windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd);
                 LRESULT(0)
             }
-            WM_TIMER if wp.0 == TIMER_PRESS_FEEDBACK => {
-                let _ = KillTimer(Some(hwnd), TIMER_PRESS_FEEDBACK);
-                with_app(|a| {
-                    if a.pressed_strip == hwnd {
-                        a.pressed_strip = HWND::default();
-                        a.push(hwnd);
-                    }
-                });
-                LRESULT(0)
-            }
-            WM_LBUTTONUP if with_app(|a| a.finder.is_some()).unwrap_or(false) => {
-                show_menu(Some(hwnd));
+            release @ (WM_LBUTTONUP | WM_RBUTTONUP)
+                if with_app(|a| a.pressed_strip == hwnd && a.press_release == release).unwrap_or(false) => {
+                clear_strip_press(hwnd);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                let mut bounds = RECT::default();
+                let mut cursor = POINT::default();
+                if GetWindowRect(hwnd, &mut bounds).is_ok() && GetCursorPos(&mut cursor).is_ok()
+                    && cursor.x >= bounds.left && cursor.x < bounds.right
+                    && cursor.y >= bounds.top && cursor.y < bounds.bottom {
+                    show_menu(Some(hwnd));
+                }
                 LRESULT(0)
             }
             WM_ERASEBKGND if with_app(|a| a.finder.is_some()).unwrap_or(false) => LRESULT(1),
@@ -4837,8 +4859,12 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 with_app(|a| a.end_drag());
                 LRESULT(0)
             }
-            WM_CAPTURECHANGED => {
+            WM_CAPTURECHANGED | WM_CANCELMODE => {
+                clear_strip_press(hwnd);
                 with_app(|a| a.drag = None);
+                if msg == WM_CANCELMODE && windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() == hwnd {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                }
                 LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
