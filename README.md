@@ -489,6 +489,7 @@ Devices that were requested but cannot be supported for now, and why. Most of th
 | Rapoo 2.4G keyboard | `24AE:2015` | No documented battery read; commands are not guessed | [#380](../../issues/380) |
 | "2.4G Wireless Receiver" mouse (Areson) | `25A7:FA11` | No documented battery read; commands are not guessed | [#381](../../issues/381) |
 | Crave Pro Wireless headset | `3299:2725` | No documented battery read; commands are not guessed | [#385](../../issues/385) |
+| Sony INZONE H9 / H7 | `054C:0E53` | HeadsetControl documents the battery read only for the INZONE H5, H9 II and Buds; commands are not guessed | [#596](../../issues/596) |
 | HECATE G5 Max Wireless | `35BB:A00B` | Its battery read is not documented yet (other projects are still waiting for one); commands are not guessed | [#386](../../issues/386) |
 | Maono wireless microphone receiver | `352F:041A` | No documented battery read; its only vendor channel is undocumented | [#387](../../issues/387) |
 | ME5 8K Receiver | `3554:F5BC` | Not among the documented CompX ids; commands are not guessed | [#388](../../issues/388) |
