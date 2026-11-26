@@ -263,3 +263,13 @@ Next to the icons = Рядом со значками
 Battery only = Только батарея
 Use Battery only for {name}?\n\nIts battery history and statistics are deleted, and from now on nothing is recorded or worked out for it: only its level is shown. This cannot be undone. = Включить «Только батарея» для {name}?\n\nИстория батареи и статистика будут удалены, и с этого момента ничего не записывается и не рассчитывается: показывается только уровень заряда. Это нельзя отменить.
 Rising level means charging (experimental) = Рост уровня = зарядка (экспериментально)
+Before the icons = Перед значками
+Where you moved it = Там, куда вы его переместили
+Change position (move it, then click) = Изменить положение (переместите и щёлкните)
+Mirror other widgets = Зеркалировать другие виджеты
+Lock device positions = Закрепить порядок устройств
+Ring style (icon inside a ring filled to the level) = Стиль кольца (значок в кольце, заполненном до уровня)
+Charging animation = Анимация зарядки
+Glowing icon = Светящийся значок
+Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution). = Зеркалирование других виджетов включено.\n\nВиджеты на всех панелях задач теперь выглядят и работают одинаково: если переместить виджет, изменить его положение или высоту или перетащить устройство на другое место на одной панели, изменятся все панели. Каждый виджет по-прежнему рисуется для своего монитора (с его масштабом и разрешением).
+Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now. = Зеркалирование других виджетов выключено.\n\nВиджет каждой панели задач теперь сам по себе: щёлкните правой кнопкой по виджету на мониторе, чтобы изменить там его положение и высоту, и перетащите его устройства в собственном порядке. То, что вы настроите на одной панели, больше не меняет остальные. Каждый виджет начинает с того места, где он сейчас.

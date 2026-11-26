@@ -70,6 +70,11 @@ const TIMER_GLIDE: usize = 25;
 /// "Widget position: left": the taskbar's left end checked again soon after a window opens or
 /// closes (its task button comes or goes), LEFT_PROBES times.
 const TIMER_LEFT_PROBE: usize = 26;
+/// Frames of the charging animation (green light passing over charging devices).
+const TIMER_CHARGE: usize = 27;
+const CHARGE_FRAME_MS: u32 = 40;
+/// One pass of the charging animation over a device.
+const CHARGE_SWEEP_MS: f32 = 1800.0;
 const LEFT_PROBES: u8 = 4;
 /// How old the taskbar's items may be when checking room for the widget: next to the icons they
 /// move all the time; next to the clock only a window opening or closing changes the room (the
@@ -221,6 +226,9 @@ const ID_POSITION_MOVE: usize = 211;
 const ID_MIRRORING: usize = 212;
 /// "Lock device positions": no dragging or moving the devices on the strip.
 const ID_LOCK_ORDER: usize = 213;
+/// "Charging animation" and "Ring style".
+const ID_CHARGE_ANIM: usize = 214;
+const ID_RING: usize = 215;
 
 /// Widget positions (registry WidgetLeft): next to the clock, at the left end, right after the
 /// taskbar icons, right before them (centred icons), or where it was put with the mouse.
@@ -371,6 +379,11 @@ struct App {
     mirroring: bool,
     /// "Lock device positions": the devices can't be dragged or moved.
     lock_order: bool,
+    /// "Charging animation": a green light passes over charging devices (since charge_t0).
+    charge_anim: bool,
+    charge_t0: ChargeClock,
+    /// "Ring style": each device as its icon inside a ring filled to its level.
+    ring: bool,
     /// "Change position" running: (strip, where the mouse holds it, its layout before).
     moving: Option<(HWND, i32, Layout)>,
     /// Strip the right-click menu was opened on (its widget's settings are the ones changed).
@@ -590,6 +603,22 @@ fn save_layout(key: &str, lay: &Layout) {
 /// behaviors > Taskbar alignment; centred unless set to left).
 fn taskbar_centred() -> bool {
     batteryhub::util::reg_get_dword(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarAl").is_none_or(|v| v != 0)
+}
+
+/// Start of the charging animation's clock.
+struct ChargeClock(Instant);
+
+impl Default for ChargeClock {
+    fn default() -> Self {
+        ChargeClock(Instant::now())
+    }
+}
+
+impl std::ops::Deref for ChargeClock {
+    type Target = Instant;
+    fn deref(&self) -> &Instant {
+        &self.0
+    }
 }
 
 /// What a widget is rendered for: its taskbar's DPI scale, orientation, and height (horizontal)
@@ -1081,13 +1110,15 @@ struct Piece {
     alpha: u32,
     gap_after: i32,
     /// Part of the piece drawn in another colour (same size as `m`, drawn at the same place):
-    /// earbuds whose two buds are coloured apart.
+    /// earbuds whose two buds are coloured apart, or a ring's filled part.
     second: Option<(Mask, COLORREF)>,
+    /// Drawn with a soft glow in its colour ("Glowing icon").
+    glow: bool,
 }
 
 impl Piece {
     fn new(dev: Option<usize>, m: Mask, color: COLORREF, alpha: u32, gap_after: i32) -> Self {
-        Piece { dev, m, color, alpha, gap_after, second: None }
+        Piece { dev, m, color, alpha, gap_after, second: None, glow: false }
     }
 
     /// The piece's masks with their colours.
@@ -1101,7 +1132,85 @@ impl Piece {
             return Piece::new(dev, m, colors.0, alpha, gap_after);
         }
         let (a, b) = split_mask(&m, at, rows);
-        Piece { dev, m: a, color: colors.0, alpha, gap_after, second: Some((b, colors.1)) }
+        Piece { dev, m: a, color: colors.0, alpha, gap_after, second: Some((b, colors.1)), glow: false }
+    }
+}
+
+/// Ring style: a `d` square with the ring (only the part above `percent`, faint) and `icon` in its
+/// middle, and a second with the ring's part filled clockwise from the top up to `percent`.
+fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
+    let n = (d * d).max(0) as usize;
+    let (mut base, mut arc) = (vec![0u8; n], vec![0u8; n]);
+    let c = d as f32 / 2.0;
+    let (ro, ri) = (c - 0.5, c - 0.5 - thick);
+    let frac = percent.clamp(0, 100) as f32 / 100.0;
+    for y in 0..d {
+        for x in 0..d {
+            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+            let r = (dx * dx + dy * dy).sqrt();
+            let cover = (ro - r + 0.5).clamp(0.0, 1.0) * (r - ri + 0.5).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            // 0 at the top, growing clockwise.
+            let mut turn = dx.atan2(-dy) / std::f32::consts::TAU;
+            if turn < 0.0 {
+                turn += 1.0;
+            }
+            let i = (y * d + x) as usize;
+            if turn <= frac && frac > 0.0 {
+                arc[i] = (cover * 255.0) as u8;
+            } else {
+                base[i] = (cover * 255.0 * 0.28) as u8;
+            }
+        }
+    }
+    let (ox, oy) = ((d - icon.w) / 2, (d - icon.h) / 2);
+    for yy in 0..icon.h {
+        for xx in 0..icon.w {
+            let (tx, ty) = (ox + xx, oy + yy);
+            if (0..d).contains(&tx) && (0..d).contains(&ty) {
+                let i = (ty * d + tx) as usize;
+                base[i] = base[i].max(icon.a[(yy * icon.w + xx) as usize]);
+            }
+        }
+    }
+    (Mask { w: d, h: d, a: base }, Mask { w: d, h: d, a: arc })
+}
+
+/// The soft glow around a piece ("Glowing icon"): `m` blurred both ways by `r` and made brighter.
+/// It is `2 r` wider and higher than `m`.
+fn glow_mask(m: &Mask, r: i32) -> Mask {
+    let g = blur_mask(&blur_mask(m, r, true), r, false);
+    Mask { w: g.w, h: g.h, a: g.a.into_iter().map(|v| (v as u32 * 2).min(255) as u8).collect() }
+}
+
+/// Charging animation: a band of `color` light passing over `from..to` (along x, or y when
+/// `vertical`) of what is drawn in `cv`, `t` (0 to 1) of the way.
+fn charge_sweep(cv: &mut Canvas, from: i32, to: i32, vertical: bool, color: COLORREF, t: f32) {
+    let band = ((to - from) as f32 * 0.35).max(6.0);
+    let pos = from as f32 - band + (to - from) as f32 * t + 2.0 * band * t;
+    let (r, g, b) = split(color);
+    let (w, h) = (cv.w, cv.h);
+    for y in 0..h {
+        for x in 0..w {
+            let along = if vertical { y } else { x };
+            if along < from || along >= to {
+                continue;
+            }
+            let d = (along as f32 + 0.5 - pos) / band;
+            let f = (-d * d).exp() * 0.85;
+            if f < 0.02 {
+                continue;
+            }
+            let p = &mut cv.px[(y * w + x) as usize];
+            let a = (*p >> 24) & 0xFF;
+            if a < 8 {
+                continue;
+            }
+            let mix = |cur: u32, tint: u8| ((cur as f32) * (1.0 - f) + (tint as u32 * a / 255) as f32 * f).round().min(a as f32) as u32;
+            *p = a << 24 | mix((*p >> 16) & 0xFF, r) << 16 | mix((*p >> 8) & 0xFF, g) << 8 | mix(*p & 0xFF, b);
+        }
     }
 }
 
@@ -1257,7 +1366,8 @@ impl App {
             }
         }
         self.sync_slide_timer();
-        let animating = self.drag.is_some() || self.sliding() || !self.presence.is_empty() || self.y_glide.is_some();
+        self.sync_charge_timer();
+        let animating = self.drag.is_some() || self.sliding() || !self.presence.is_empty() || self.y_glide.is_some() || self.charging_shown();
         if resized || !animating {
             self.last_place.2 = -1; // force a reposition with the new width
             self.place();
@@ -1333,8 +1443,20 @@ impl App {
             // Lightning bolt on power: green while charging, blue once it reached 100%.
             let bolt_color = ui::bolt_color(d, light);
             let mark = bolt_color.is_some();
+            let glow = settings::glow(SETTINGS_KEY, &d.key);
+            if self.ring && d.percent >= 0 {
+                // Ring style: the icon inside a ring filled clockwise to the level, green while
+                // charging, blue when full, red when low, else in the icon's colour.
+                let ring_color = bolt_color.unwrap_or(if low { red } else { own });
+                let (base, arc) = ring_masks(&device_icon(d, bolt, light), px(24.0), (2.5 * s).max(2.0), d.percent);
+                let mut p = Piece::new(Some(i), base, icon_tint(low), alpha, 0);
+                p.second = Some((arc, ring_color));
+                p.glow = glow;
+                pieces.push(p);
+                continue;
+            }
             let icon = device_icon(d, icons, light);
-            let icon_piece = match buds_low {
+            let mut icon_piece = match buds_low {
                 // Each bud of the drawn earbuds in its own colour (left bud in the left half).
                 Some((l, r)) if d.kind == DeviceKind::Earbuds => {
                     let half = icon.w / 2;
@@ -1342,6 +1464,7 @@ impl App {
                 }
                 _ => Piece::new(Some(i), icon, icon_tint(low), alpha, px(5.0)),
             };
+            icon_piece.glow = glow;
             pieces.push(icon_piece);
             let gap = if mark { px(2.0) } else { 0 };
             let both = d.buds.filter(|b| d.percent >= 0 && b.left >= 0 && b.right >= 0);
@@ -1477,6 +1600,10 @@ impl App {
                 }
                 let (off, blur, alpha) = p.dev.map(|i| moves[i]).unwrap_or((0, 0, 255));
                 let y0 = (y.unwrap_or((h - p.m.h) / 2) + px(shift_y)).clamp(0, (h - p.m.h).max(0));
+                if p.glow && p.dev.is_some_and(|i| items[i].p >= 1.0) {
+                    let r = px(3.0).max(1);
+                    cv.draw(&glow_mask(&p.m, r), x + off - r, y0 - r, p.color, p.alpha * alpha / 255);
+                }
                 for (m, color) in p.layers() {
                     if let Some(i) = p.dev
                         && items[i].p < 1.0
@@ -1495,8 +1622,42 @@ impl App {
         if let Some(last) = v.hits.last_mut() {
             last.1 = w;
         }
+        self.charge_light(&mut cv, items, &ranges, &moves, false);
         v.size = SIZE { cx: w, cy: h };
         v.px = cv.px;
+    }
+
+    /// "Charging animation": the light passing over every charging device that is fully shown.
+    fn charge_light(&self, cv: &mut Canvas, items: &[Item], ranges: &[(i32, i32)], moves: &[(i32, i32, u32)], vertical: bool) {
+        if !self.charge_anim {
+            return;
+        }
+        let t = (self.charge_t0.elapsed().as_secs_f32() * 1000.0 % CHARGE_SWEEP_MS) / CHARGE_SWEEP_MS;
+        for (i, it) in items.iter().enumerate() {
+            if let Some(d) = &it.dev
+                && d.is_charging()
+                && !d.is_full()
+                && it.p >= 1.0
+            {
+                let off = moves.get(i).map_or(0, |m| m.0);
+                charge_sweep(cv, ranges[i].0 + off, ranges[i].1 + off, vertical, ui::charging_color(self.light), t);
+            }
+        }
+    }
+
+    /// The charging animation runs while it is on and some shown device is charging.
+    fn charging_shown(&self) -> bool {
+        self.charge_anim && !self.fallback && self.visible().iter().any(|d| d.is_charging() && !d.is_full())
+    }
+
+    fn sync_charge_timer(&self) {
+        unsafe {
+            if self.charging_shown() {
+                SetTimer(Some(self.main), TIMER_CHARGE, CHARGE_FRAME_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.main), TIMER_CHARGE);
+            }
+        }
     }
 
     /// Vertical taskbar: each device as its icon over its level (the bolt beside the level when it
@@ -1553,6 +1714,10 @@ impl App {
                     continue;
                 }
                 let (off, blur, alpha) = p.dev.map(|i| moves[i]).unwrap_or((0, 0, 255));
+                if p.glow && p.dev.is_some_and(|i| items[i].p >= 1.0) {
+                    let r = px(3.0).max(1);
+                    cv.draw(&glow_mask(&p.m, r), x - r, y + off - r, p.color, p.alpha * alpha / 255);
+                }
                 for (m, color) in p.layers() {
                     if let Some(i) = p.dev
                         && items[i].p < 1.0
@@ -1567,6 +1732,7 @@ impl App {
                 }
             }
         }
+        self.charge_light(&mut cv, items, &ranges, &moves, true);
         v.hits = hits;
         v.size = SIZE { cx: w, cy: h };
         v.px = cv.px;
@@ -4243,6 +4409,8 @@ impl App {
         self.free_x = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetFreeX").unwrap_or(0) as i32;
         self.mirroring = batteryhub::util::reg_get_dword(SETTINGS_KEY, "MirrorWidgets").is_none_or(|v| v != 0);
         self.lock_order = batteryhub::util::reg_get_dword(SETTINGS_KEY, "LockDeviceOrder").unwrap_or(0) != 0;
+        self.charge_anim = batteryhub::util::reg_get_dword(SETTINGS_KEY, "ChargingAnimation").unwrap_or(0) != 0;
+        self.ring = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetStyle").unwrap_or(0) == 1;
         settings::ORDER_LOCKED.store(self.lock_order, std::sync::atomic::Ordering::Relaxed);
         self.hide_empty = batteryhub::util::reg_get_dword(SETTINGS_KEY, "HideWhenEmpty").unwrap_or(0) != 0;
         self.offset_y = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffsetY").unwrap_or(0) as i32;
@@ -5033,6 +5201,10 @@ unsafe fn show_menu(from: Option<HWND>) {
                     let _ = AppendMenuW(widget, MF_STRING | check(mirroring), ID_MIRRORING, &windows::core::HSTRING::from(tr("Mirror other widgets")));
                 }
                 let _ = AppendMenuW(widget, MF_STRING | check(lock_order), ID_LOCK_ORDER, &windows::core::HSTRING::from(tr("Lock device positions")));
+                let (charge_anim, ring) = with_app(|a| (a.charge_anim, a.ring)).unwrap_or_default();
+                let _ = AppendMenuW(widget, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
+                let _ = AppendMenuW(widget, MF_STRING | check(ring), ID_RING, &windows::core::HSTRING::from(tr("Ring style (icon inside a ring filled to the level)")));
+                let _ = AppendMenuW(widget, MF_STRING | check(charge_anim), ID_CHARGE_ANIM, &windows::core::HSTRING::from(tr("Charging animation")));
                 let n = GetMenuItemCount(Some(menu));
                 let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, widget.0 as usize, &windows::core::HSTRING::from(tr("Widget")));
                 icons.set(menu, n as u32, true, ui::glyph::VIEW);
@@ -5211,6 +5383,21 @@ unsafe fn show_menu(from: Option<HWND>) {
                 ID_POSITION_MOVE => {
                     with_app(|a| a.begin_move(target));
                 }
+                ID_RING => {
+                    with_app(|a| {
+                        a.ring = !a.ring;
+                        save_dword("WidgetStyle", a.ring as u32);
+                        a.paint();
+                        a.tick();
+                    });
+                }
+                ID_CHARGE_ANIM => {
+                    with_app(|a| {
+                        a.charge_anim = !a.charge_anim;
+                        save_dword("ChargingAnimation", a.charge_anim as u32);
+                        a.paint();
+                    });
+                }
                 ID_LOCK_ORDER => {
                     with_app(|a| {
                         a.lock_order = !a.lock_order;
@@ -5222,11 +5409,7 @@ unsafe fn show_menu(from: Option<HWND>) {
                     let on = !mirroring;
                     message(
                         main,
-                        &tr(if on {
-                            "Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution)."
-                        } else {
-                            "Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now."
-                        }),
+                        &tr(if on { MIRROR_ON_TEXT } else { MIRROR_OFF_TEXT }),
                         MB_OK | MB_ICONINFORMATION,
                     );
                     with_app(|a| {
@@ -5416,6 +5599,9 @@ fn glide_ease(t0: Instant) -> f32 {
 
 
 /// "Reset measurements": asks first, then deletes the device's history.
+const MIRROR_ON_TEXT: &str = n_("Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution).");
+const MIRROR_OFF_TEXT: &str = n_("Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now.");
+
 const BATTERY_ONLY_QUESTION: &str = n_(
     "Use Battery only for {name}?\n\nIts battery history and statistics are deleted, and from now on nothing is recorded or worked out for it: only its level is shown. This cannot be undone."
 );
@@ -5496,6 +5682,10 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
                 }
                 a.card_cache.clear();
             });
+        }
+        DeviceAction::ToggleGlow => {
+            settings::set_glow(SETTINGS_KEY, &d.key, !settings::glow(SETTINGS_KEY, &d.key));
+            with_app(|a| a.paint());
         }
         DeviceAction::ToggleRiseCharging => {
             settings::set_rise_charging(SETTINGS_KEY, &d.key, !settings::rise_charging(SETTINGS_KEY, &d.key));
@@ -5942,7 +6132,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     TIMER_QUICK => a.start_quick(),
                     TIMER_NOTIFY => a.end_notify(),
                     TIMER_AWAY => a.away_step(),
-                    TIMER_SLIDE => a.paint(),
+                    TIMER_SLIDE | TIMER_CHARGE => a.paint(),
                     TIMER_MIRROR_IN => a.mirror_in_step(),
                     TIMER_GLIDE => a.glide_step(),
                     TIMER_LEFT_PROBE => {

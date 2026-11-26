@@ -263,3 +263,13 @@ Next to the icons = Neben den Symbolen
 Battery only = Nur Akku
 Use Battery only for {name}?\n\nIts battery history and statistics are deleted, and from now on nothing is recorded or worked out for it: only its level is shown. This cannot be undone. = „Nur Akku“ für {name} verwenden?\n\nAkkuverlauf und Statistiken werden gelöscht, und ab jetzt wird nichts mehr aufgezeichnet oder berechnet: nur der Akkustand wird angezeigt. Dies kann nicht rückgängig gemacht werden.
 Rising level means charging (experimental) = Steigender Stand = lädt (experimentell)
+Before the icons = Vor den Symbolen
+Where you moved it = Wohin du es verschoben hast
+Change position (move it, then click) = Position ändern (verschieben, dann klicken)
+Mirror other widgets = Andere Widgets spiegeln
+Lock device positions = Gerätepositionen sperren
+Ring style (icon inside a ring filled to the level) = Ringstil (Symbol in einem Ring, gefüllt bis zum Stand)
+Charging animation = Ladeanimation
+Glowing icon = Leuchtendes Symbol
+Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution). = Andere Widgets spiegeln ist an.\n\nDie Widgets auf allen Taskleisten sehen jetzt gleich aus und verhalten sich gleich: Wenn du das Widget verschiebst, seine Position oder Höhe änderst oder ein Gerät auf einer Taskleiste an eine andere Stelle ziehst, ändern sich alle Taskleisten. Jedes Widget wird weiterhin für seinen eigenen Monitor gezeichnet (eigene Skalierung und Auflösung).
+Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now. = Andere Widgets spiegeln ist aus.\n\nDas Widget jeder Taskleiste ist jetzt eigenständig: Klicke mit der rechten Maustaste auf das Widget eines Monitors, um dort Position und Höhe zu ändern, und ziehe seine Geräte in eine eigene Reihenfolge. Was du auf einer Taskleiste einstellst, ändert die anderen nicht mehr. Jedes Widget beginnt dort, wo es jetzt ist.

@@ -263,3 +263,13 @@ Next to the icons = Ao lado dos ícones
 Battery only = Somente bateria
 Use Battery only for {name}?\n\nIts battery history and statistics are deleted, and from now on nothing is recorded or worked out for it: only its level is shown. This cannot be undone. = Usar Somente bateria para {name}?\n\nO histórico de bateria e as estatísticas são excluídos e, a partir de agora, nada é registrado ou calculado: só o nível é mostrado. Não é possível desfazer.
 Rising level means charging (experimental) = Nível subindo = carregando (experimental)
+Before the icons = Antes dos ícones
+Where you moved it = Onde você o moveu
+Change position (move it, then click) = Mudar posição (mova e clique)
+Mirror other widgets = Espelhar os outros widgets
+Lock device positions = Travar a posição dos dispositivos
+Ring style (icon inside a ring filled to the level) = Estilo anel (ícone dentro de um anel preenchido até o nível)
+Charging animation = Animação de carregamento
+Glowing icon = Ícone brilhante
+Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution). = Espelhar os outros widgets está ativado.\n\nOs widgets de todas as suas barras de tarefas agora têm a mesma aparência e o mesmo comportamento: mover o widget, mudar sua posição ou altura, ou arrastar um dispositivo para outro lugar em uma barra muda todas as barras. Cada widget continua sendo desenhado para o próprio monitor (sua escala e resolução).
+Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now. = Espelhar os outros widgets está desativado.\n\nO widget de cada barra de tarefas agora é independente: clique com o botão direito no widget de um monitor para mudar ali sua posição e altura, e arraste seus dispositivos para uma ordem própria. O que você ajustar em uma barra não muda mais as outras. Cada widget começa onde está agora.

@@ -263,3 +263,13 @@ Next to the icons = Поруч зі значками
 Battery only = Лише батарея
 Use Battery only for {name}?\n\nIts battery history and statistics are deleted, and from now on nothing is recorded or worked out for it: only its level is shown. This cannot be undone. = Увімкнути «Лише батарея» для {name}?\n\nІсторію батареї та статистику буде видалено, і відтепер нічого не записується й не обчислюється: показується лише рівень заряду. Цю дію не можна скасувати.
 Rising level means charging (experimental) = Зростання рівня = заряджання (експериментально)
+Before the icons = Перед значками
+Where you moved it = Там, куди ви його перемістили
+Change position (move it, then click) = Змінити положення (перемістіть і клацніть)
+Mirror other widgets = Віддзеркалювати інші віджети
+Lock device positions = Заблокувати порядок пристроїв
+Ring style (icon inside a ring filled to the level) = Стиль кільця (значок у кільці, заповненому до рівня)
+Charging animation = Анімація заряджання
+Glowing icon = Значок, що світиться
+Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and behave the same: moving the widget, changing its position or height, or dragging a device to another place on one taskbar changes every taskbar alike. Each widget is still drawn for its own monitor (its own scaling and resolution). = Віддзеркалення інших віджетів увімкнено.\n\nВіджети на всіх панелях завдань тепер виглядають і працюють однаково: якщо перемістити віджет, змінити його положення чи висоту або перетягнути пристрій на інше місце на одній панелі, зміняться всі панелі. Кожен віджет і далі малюється для свого монітора (з його масштабом і роздільністю).
+Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now. = Віддзеркалення інших віджетів вимкнено.\n\nВіджет кожної панелі завдань тепер окремий: клацніть правою кнопкою віджет на моніторі, щоб змінити там його положення і висоту, і перетягніть його пристрої у власному порядку. Те, що ви налаштуєте на одній панелі, більше не змінює інші. Кожен віджет починає з того місця, де він зараз.
