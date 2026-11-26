@@ -1,6 +1,6 @@
 <p align="center"><img src="res/batteryhub.png" width="112" alt="BatteryHub icon"></p>
 
-<h1 align="center">BatteryHub v1.8</h1>
+<h1 align="center">BatteryHub v1.9</h1>
 
 <p align="center">
 <b>An ultra-lightweight Rust implementation of BatteryHub for Windows.</b><br>
@@ -53,7 +53,7 @@ in about <b>0.2 MB of RAM</b>.
 
 ## Download
 
-Get **`BatteryHub-Taskbar-Setup-v1.8.exe`** from the [**latest release**](../../releases/latest), run it and click **Install**.
+Get **`BatteryHub-Taskbar-Setup-v1.9.exe`** from the [**latest release**](../../releases/latest), run it and click **Install**.
 
 - No administrator rights needed (per-user install).
 - Already installed? Use *Check for updates...* in the right-click menu, or run the new setup and click **Update**.
@@ -137,17 +137,21 @@ Left click does nothing (on purpose: the strip stays out of the way). **Right cl
 
 | Menu item | What it does |
 |---|---|
-| *Device name (level, state; earbuds: L: / R:)* ▸ | *Dashboard...*, *Battery history*, *Statistics* (the dashboard on that tab), *Rename device...*, *Red warning at or below* 50 / 40 / 30 / 20 / **15** / 10 / 5%, *Warn at 5% (notification)* (**on** by default), *Red icon at the warning level* (off by default; earbuds: each bud on its own), *Icon colour* (the taskbar's, the brand's, e.g. Razer green or Logitech blue, six ready-made colours or your own), and *Show on the taskbar* (**on** by default; turned off, the device leaves the strip, its tooltip and the hover card but stays in this menu, still read, with its history and the 5% warning), *On hover* ▸ (*Card with details*, the default; *Only the name and level (tooltip)*, the short tooltip of the first versions, e.g. "Mouse: 80% (charging)"; or *Nothing* (only the highlight); plus *Battery chart on the card* and *Time left on the card*, both **on** by default), *Battery only (no history, statistics or forecast)* (off by default; turning it on asks first, deletes the device's history and statistics, and from then on nothing is recorded or worked out for it, only its level is shown), *Move left* / *Move right* (its place on the strip; dragging it there works too) and *Reset measurements...* (asks first, then deletes the device's history and statistics) |
+| *Device name (level, state; earbuds: L: / R:)* ▸ | *Dashboard...*, *Battery history*, *Statistics* (the dashboard on that tab), *Rename device...*, *Red warning at or below* 50 / 40 / 30 / 20 / **15** / 10 / 5%, *Warn at 5% (notification)* (**on** by default), *Red icon at the warning level* (off by default; earbuds: each bud on its own), *Icon colour* (the taskbar's, the brand's, e.g. Razer green or Logitech blue, six ready-made colours or your own), and *Show on the taskbar* (**on** by default; turned off, the device leaves the strip, its tooltip and the hover card but stays in this menu, still read, with its history and the 5% warning), *On hover* ▸ (*Card with details*, the default; *Only the name and level (tooltip)*, the short tooltip of the first versions, e.g. "Mouse: 80% (charging)"; or *Nothing* (only the highlight); plus *Battery chart on the card* and *Time left on the card*, both **on** by default), *Battery only (no history, statistics or forecast)* (off by default; turning it on asks first, deletes the device's history and statistics, and from then on nothing is recorded or worked out for it, only its level is shown), *Glowing icon* (off by default: a soft glow around its icon, in the icon's colour), *Move left* / *Move right* (its place on the strip; dragging it there works too) and *Reset measurements...* (asks first, then deletes the device's history and statistics) |
 | *Refresh devices* | Full rescan; devices that are gone disappear |
 | *Refresh battery levels* | Reads the levels again |
 | *Widget* ▸ *Show the icon when no device is connected* | **On** by default: with no device the strip shows a grey battery, so there is always something to right-click. Turned off, the strip stays empty then and BatteryHub's own icon appears in the notification area instead (right-click it for this menu) |
 | *Widget* ▸ *Icons above percentages (narrower)* | **Off** by default. Each device's icon above its level, so the strip takes about half the width (when the taskbar is tall enough; by [DyAvr](https://github.com/DyAvr), #456) |
 | *Widget* ▸ *Show as notification-area icons (Windows arranges them)* | **Off** by default. Instead of the strip, one notification-area icon per device with its level drawn in it. Windows places these icons like any other: drag them to reorder or in and out of the hidden icons. New icons start hidden behind ^ (Windows 11 does that for every app): drag them onto the taskbar or turn them on in *Settings → Personalization → Taskbar → Other system tray icons* once; Windows remembers it per device |
 | *Widget* ▸ *Background behind taskbar text (for translucent taskbars)* | **Off** by default. A rounded plate in the taskbar's colour behind the widget, so it stays readable on a transparent taskbar (TranslucentTB, Windhawk Taskbar Styler...) |
-| *Widget* ▸ *Widget position* ▸ | **Right** (default, next to the clock), **Next to the icons** (right after the last task button, also when they are centred) or **Left**: right after the last taskbar icon when they are aligned left, or at the taskbar's left end (after the widgets / weather button, never on top of it) when they are centred; it follows as icons come and go. Horizontal taskbars only; *Position on the taskbar* applies to the right side |
-| *Widget* ▸ *Position on the taskbar* ▸ | **Next to the notification area** or 20 to 200 px to the left of it (in 20 px steps), e.g. to make room for another taskbar widget (iCUE, network meters...). *Move 10 px left / right* at the bottom moves it in 10 px steps to any place (shown as *Custom*). Also applies on other monitors |
+| *Widget* ▸ *Widget position* ▸ | **Right** (default, next to the clock), **Next to the icons** (right after the last task button, also when they are centred), **Before the icons** (right before the first task button; centred taskbar icons only) or **Left**: right after the last taskbar icon when they are aligned left, or at the taskbar's left end (after the widgets / weather button, never on top of it) when they are centred; it follows as icons come and go. Horizontal taskbars only; *Position on the taskbar* applies to the right side |
+| *Widget* ▸ *Position on the taskbar* ▸ | **Next to the notification area** or 20 to 200 px to the left of it (in 20 px steps), e.g. to make room for another taskbar widget (iCUE, network meters...). *Move 10 px left / right* at the bottom moves it in 10 px steps to any place (shown as *Custom*). **Change position** lets the widget follow the mouse anywhere along the taskbar; a click puts it down (right-click: back where it was). Also applies on other monitors (unless *Mirror other widgets* is off) |
 | *Widget* ▸ *Height on the taskbar* ▸ | 5 / 10 / 15 px up, **Centred**, or 5 / 10 / 15 px down; *Move 10 px up / down* at the bottom moves it in 10 px steps (up to 40 px, shown as *Custom*). Also applies on other monitors |
 | *Widget* ▸ *Show widget on* ▸ | Only with more than one monitor: *All monitors* / **Main monitor only** / *Display 2 (left) only*... The monitor is remembered by its identity, not its number; while it is unplugged the widget is on the main taskbar. Other monitors need *Show my taskbar on all displays* in Windows (taskbars of other programs, e.g. DisplayFusion, are not supported) |
+| *Widget* ▸ *Mirror other widgets* | **On** by default (with more than one monitor): every taskbar's widget has the same place, height and device order. Off: each taskbar's widget is on its own; right-click it on its monitor to change its place and height there, and drag its devices into an order of their own. Either way each widget is drawn for its own monitor's scaling and resolution |
+| *Widget* ▸ *Lock device positions* | **Off** by default. The devices can't be dragged on the strip or moved with *Move left / right* |
+| *Widget* ▸ *Ring style* | **Off** by default. Each device as its icon inside a ring filled clockwise to its level: green while charging, blue when full, red when low, otherwise in the icon's colour |
+| *Widget* ▸ *Charging animation* | **Off** by default. A green light passes over every charging device |
 | *Settings* ▸ *Refresh battery every* ▸ | **1 minute** / 5 / 10 / 30 minutes / 1 hour |
 | *Settings* ▸ *Refresh when a device connects or disconnects* | **On** by default; see below |
 | *Settings* ▸ *Language* ▸ | **Windows language (...)** (the default, with the language it resolves to in brackets: the Windows *display* language, or English when BatteryHub has no translation for it), or one of the languages listed. The region and format setting (date, number format) does not count: with an English Windows and Polish formats, BatteryHub is in English until you pick *Polski*. *Create your own language...* and *Open the languages folder*: see [Your own language](#translations-create-your-own-language) |
@@ -557,7 +561,7 @@ Requirements: Rust 1.99 or newer (stable, MSVC toolchain; the crates use the 202
 .\build-release.ps1
 ```
 
-This builds the program, then the setup with the program embedded (`installer/`, `BH_PAYLOAD_DIR`), and writes `release\BatteryHub-Taskbar-Setup-v1.8.exe` and `SHA256SUMS.txt`. The version comes from the `VERSION` file (up to four parts, e.g. `1.0.1.1`).
+This builds the program, then the setup with the program embedded (`installer/`, `BH_PAYLOAD_DIR`), and writes `release\BatteryHub-Taskbar-Setup-v1.9.exe` and `SHA256SUMS.txt`. The version comes from the `VERSION` file (up to four parts, e.g. `1.0.1.1`).
 
 | Path | Contents |
 |---|---|

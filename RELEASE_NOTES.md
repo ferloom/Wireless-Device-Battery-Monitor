@@ -1,4 +1,4 @@
-# BatteryHub v1.8 (Rust)
+# BatteryHub v1.9 (Rust)
 
 An ultra-lightweight Rust implementation of BatteryHub for Windows, a recode of [krisgfx9/Wireless-Device-Battery-Monitor](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor). All credit for the original idea, look and device protocols goes to the original project.
 
@@ -6,10 +6,19 @@ An ultra-lightweight Rust implementation of BatteryHub for Windows, a recode of 
 
 | File | |
 |---|---|
-| `BatteryHub-Taskbar-Setup-v1.8.exe` | Setup: Install / Update / Uninstall |
+| `BatteryHub-Taskbar-Setup-v1.9.exe` | Setup: Install / Update / Uninstall |
 | `SHA256SUMS.txt` | Checksum |
 
 Already installed? Use *Check for updates...* in the right-click menu (v1.1 and later), or run the new setup and click **Update**. Your settings and autostart choice are kept.
+
+## New in v1.9
+
+- **Every monitor's widget is drawn for that monitor:** right size with different scaling or resolutions (#392, #595), and its own orientation.
+- **Mirror other widgets** (on by default): turn it off and each taskbar's widget gets its own place, height and device order.
+- **Widget position:** *Before the icons* (centred taskbar icons), and *Change position*: move the widget anywhere along the taskbar with the mouse, a click puts it down.
+- **Lock device positions**, **Ring style** (icon inside a ring filled to the level), **Charging animation**, and per device a **Glowing icon**.
+- **Phones (experimental):** a level that stays the same keeps "charging" for 10 minutes, then it ends.
+- **Request support for a device** now goes to the device-requests channel on [Discord](https://discord.gg/hAbyqpT3EA).
 
 ## New in v1.8
 
