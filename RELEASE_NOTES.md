@@ -17,6 +17,7 @@ Already installed? Use *Check for updates...* in the right-click menu (v1.1 and 
 - **Mirror other widgets** (on by default): turn it off and each taskbar's widget gets its own place, height and device order.
 - **Widget position:** *Before the icons* (centred taskbar icons), and *Change position*: move the widget anywhere along the taskbar with the mouse, a click puts it down.
 - **Lock device positions**, **Ring style** (icon inside a ring filled to the level), **Charging animation**, and per device a **Glowing icon**.
+- **Devices:** Corsair Harpoon RGB Wireless, also next to an HS80 on one Slipstream receiver (by [yacker05](https://github.com/yacker05), #611); Logitech devices no longer show twice on LIGHTSPEED receivers (by [Bacurovisk](https://github.com/Bacurovisk), #602); WLMOUSE Beast X Mini on its cable and receiver is one device (#4).
 - **Phones (experimental):** a level that stays the same keeps "charging" for 10 minutes, then it ends.
 - **Request support for a device** now goes to the device-requests forum on [Discord](https://discord.gg/ST5YWwcCxb): one post per device.
 

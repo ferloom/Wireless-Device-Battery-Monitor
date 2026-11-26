@@ -52,23 +52,39 @@ fn query(c: &HidColl) -> Option<(i32, bool)> {
     None
 }
 
+/// The mouse a USB-cable id belongs to: its cable and its receiver are one device (one key).
+/// Only pairs seen on hardware (#4: the Beast X Mini's cable is `A886`, its receiver `A885`).
+fn receiver_of(pid: u16) -> Option<u16> {
+    match pid {
+        0xA886 => Some(0xA885),
+        _ => None,
+    }
+}
+
 pub fn poll(ctx: &mut PollContext) {
+    // One entry per mouse: on its cable and its receiver at the same time it is read once, the
+    // cable's answer first (it also says whether it charges).
+    let mut found_by: Vec<(DeviceStatus, u16)> = Vec::new();
     for (vid, pid) in ctx.products(VID) {
         let mut colls = ctx.find(vid, pid, |c| c.page() == 0xFFFF && c.feat_len() >= 64);
         if colls.is_empty() {
             continue;
         }
         colls.sort_by_key(|c| c.usage() != 0);
-        let name = model(pid).map(String::from).unwrap_or_else(|| {
+        let cable = receiver_of(pid);
+        let mouse = cable.unwrap_or(pid);
+        let name = model(mouse).map(String::from).unwrap_or_else(|| {
             let n = crate::report::clean_name(&hid::product_string(&colls[0]));
             if n.is_empty() || n == "?" { "WLmouse mouse".into() } else { n }
         });
         let found = colls.iter().find_map(query);
+        // Both ids are ours, also the one whose answer is not kept.
+        ctx.claim(vid, pid);
         let base = DeviceStatus {
-            key: format!("wlmouse:{}", hex4(pid)),
+            key: format!("wlmouse:{}", hex4(mouse)),
             name,
             kind: DeviceKind::Mouse,
-            via: "2.4 GHz receiver".into(),
+            via: if cable.is_some() { "USB cable".into() } else { "2.4 GHz receiver".into() },
             hw: Some((vid, pid)),
             grace_sec: 60,
             ..Default::default()
@@ -77,13 +93,30 @@ pub fn poll(ctx: &mut PollContext) {
             Some((level, charging)) => DeviceStatus { percent: level, charging, ..base },
             None => DeviceStatus { connected: false, ..base },
         };
-        ctx.add(s, vid, pid);
+        match found_by.iter_mut().find(|(o, _)| o.key == s.key) {
+            // The other one already answered (the cable before the receiver): keep the better.
+            Some(slot) => {
+                if (s.connected && !slot.0.connected) || (s.connected && cable.is_some()) {
+                    *slot = (s, pid);
+                }
+            }
+            None => found_by.push((s, pid)),
+        }
+    }
+    for (s, pid) in found_by {
+        ctx.add(s, VID, pid);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::parse;
+
+    #[test]
+    fn cable_and_receiver_are_one_mouse() {
+        assert_eq!(super::receiver_of(0xA886), Some(0xA885));
+        assert_eq!(super::receiver_of(0xA885), None);
+    }
 
     #[test]
     fn reply() {
