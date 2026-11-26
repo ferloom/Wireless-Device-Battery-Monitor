@@ -21,7 +21,7 @@ jobs:
             installer
 
       - name: Unit tests (drivers, settings, removal rules)
-        run: cargo test --release --lib
+        run: cargo test --release --locked --lib --bins
 
       - name: Build the program
         run: cargo build --release --bins

@@ -51,6 +51,7 @@ jobs:
           REPO: ${{ github.repository }}
           LABEL: awaiting-confirmation
           OWNER: ${{ github.repository_owner }}
+        shell: bash
         run: |
           now=$(date -u +%s)
           for n in $(gh issue list --repo "$REPO" --label "$LABEL" --state open --limit 500 --json number -q '.[].number'); do
@@ -58,8 +59,11 @@ jobs:
             labelled=$(gh api "repos/$REPO/issues/$n/events" --paginate \
               -q ".[] | select(.event == \"labeled\" and .label.name == \"$LABEL\") | .created_at" | tail -n 1)
             [ -z "$labelled" ] && continue
-            replies=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
-              -q ".[] | select(.created_at > \"$labelled\" and .user.login != \"$OWNER\" and .user.type != \"Bot\") | .id" | wc -l)
+            if ! replies=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
+              -q ".[] | select(.created_at > \"$labelled\" and .user.login != \"$OWNER\" and .user.type != \"Bot\") | .id" | wc -l); then
+              echo "#$n: could not read comments, keeping open" >&2
+              continue
+            fi
             if [ "${replies:-0}" -gt 0 ]; then
               gh issue edit "$n" --repo "$REPO" --remove-label "$LABEL"
               echo "#$n: reply received, kept open"

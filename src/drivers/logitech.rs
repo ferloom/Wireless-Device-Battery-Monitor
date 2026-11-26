@@ -361,27 +361,31 @@ fn read_battery20(h: &Hidpp, idx: u8, pid: u16, s: &mut DeviceStatus) -> bool {
     false
 }
 
+fn read_device_name(len: u8, mut read_chunk: impl FnMut(u8) -> Option<Vec<u8>>) -> String {
+    let len = usize::from(len);
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        let Some(chunk) = read_chunk(bytes.len() as u8) else { break };
+        if chunk.is_empty() {
+            break;
+        }
+        let chunk = &chunk[..chunk.len().min(len - bytes.len())];
+        if let Some(end) = chunk.iter().position(|&b| b == 0) {
+            bytes.extend_from_slice(&chunk[..end]);
+            break;
+        }
+        bytes.extend_from_slice(chunk);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn read_name_and_type20(h: &Hidpp, idx: u8, s: &mut DeviceStatus) {
     let f = h.feature_index(idx, 0x0005); // DEVICE_NAME
     if f == 0 {
         return;
     }
     if let Some(p) = h.call(idx, f, 0, &[]).filter(|p| !p.is_empty()) {
-        let len = p[0] as usize;
-        let mut name = String::new();
-        while name.len() < len {
-            let Some(p) = h.call(idx, f, 1, &[name.len() as u8]).filter(|p| !p.is_empty()) else { break };
-            let before = name.len();
-            for &ch in &p {
-                if name.len() >= len || ch == 0 {
-                    break;
-                }
-                name.push(ch as char);
-            }
-            if name.len() == before {
-                break;
-            }
-        }
+        let name = read_device_name(p[0], |offset| h.call(idx, f, 1, &[offset]));
         if !name.is_empty() {
             s.name = if name.starts_with("Logitech") || name.starts_with("G ") || name.starts_with("MX") { name } else { format!("Logitech {name}") };
         }
@@ -635,6 +639,19 @@ pub fn poll(ctx: &mut PollContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_chunks_use_wire_byte_offsets() {
+        let name = read_device_name(4, |offset| match offset {
+            0 => Some(vec![b'M', 0xc3]),
+            2 => Some(vec![0xa9]),
+            3 => Some(vec![b'X', 0]),
+            _ => panic!("unexpected offset {offset}"),
+        });
+        assert_eq!(name, "M\u{e9}X");
+        assert_eq!(read_device_name(8, |_| Some(b"MX\0pad".to_vec())), "MX");
+        assert_eq!(read_device_name(2, |_| Some(Vec::new())), "");
+    }
 
     #[test]
     fn li_ion_curve_end_points_and_order() {

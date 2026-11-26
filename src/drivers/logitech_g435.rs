@@ -214,11 +214,19 @@ const PA_BATTERY: [u8; 7] = [0x50, 0x41, 0x06, 0x02, 0x01, 0x00, 0x31];
 const PA_SET_MODE: [u8; 7] = [0x50, 0x41, 0x0E, 0x03, 0x02, 0xE1, 0x01];
 const PA_BATTERY_2: [u8; 7] = [0x50, 0x41, 0x06, 0x04, 0x01, 0x00, 0x31];
 
+fn bridge_report(len: usize, body: &[u8]) -> Option<Vec<u8>> {
+    if len <= body.len() {
+        return None;
+    }
+    let mut report = vec![0; len];
+    report[0] = 0x06;
+    report[1..1 + body.len()].copy_from_slice(body);
+    Some(report)
+}
+
 /// One bridge message on report 6, then the 06 5A / 06 FE acknowledgement from the input pipe.
 fn bridge_msg(d: &HidDev, body: &[u8]) -> bool {
-    let mut out = vec![0u8; d.coll().out_len() as usize];
-    out[0] = 0x06;
-    out[1..1 + body.len()].copy_from_slice(body);
+    let Some(out) = bridge_report(d.coll().out_len() as usize, body) else { return false };
     d.flush();
     if !d.write(&out) {
         return false;
@@ -540,6 +548,14 @@ fn poll_acb(ctx: &mut PollContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_report_checks_output_capacity() {
+        assert_eq!(bridge_report(0, &[]), None);
+        assert_eq!(bridge_report(2, &[1, 2]), None);
+        assert_eq!(bridge_report(3, &[1, 2]), Some(vec![6, 1, 2]));
+        assert_eq!(bridge_report(5, &[1, 2]), Some(vec![6, 1, 2, 0, 0]));
+    }
 
     #[test]
     fn frames() {

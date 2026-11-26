@@ -326,8 +326,7 @@ impl Ui {
         if let Some(prev) = self.prev.as_mut() {
             if self.page_t.running() && prev.w == w && prev.h == h {
                 let a = ((1.0 - e) * 255.0) as u32;
-                let old = prev.px().to_vec();
-                for (d, o) in b.px().iter_mut().zip(old) {
+                for (d, &o) in b.px().iter_mut().zip(prev.px().iter()) {
                     let ch = |sh: u32| ((((o >> sh) & 0xFF) * a + ((*d >> sh) & 0xFF) * (255 - a)) / 255) << sh;
                     *d = 0xFF00_0000 | ch(16) | ch(8) | ch(0);
                 }
