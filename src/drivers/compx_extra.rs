@@ -15,8 +15,8 @@
 //!   Kysona driver, GPL-3.0, src/drivers/kysona.cpp, which sends this frame to every 3554 receiver
 //!   but the AULA keyboard ones), LAMZU 1K Champion Receiver 3554:F50D (#149), IO Aurora Receiver
 //!   3554:FB08 (#151), Red Square Kiro 1K Receiver 3554:FB5A (#153) and VGN DragonFly F2 Ultra+
-//!   3554:FB49 (#166), VGN DragonFly F2 Pro Max 3554:FB3E (#524, checked on the reporter's mouse), and Ardor Gaming Phantom Pro 3554:F5C4 (#181) / Phantom Pro V2 3554:F52D
-//!   (#185). A receiver that does not speak the protocol gives no checksummed reply and is
+//!   3554:FB49 (#166), VGN DragonFly F2 Pro Max 3554:FB3E (#524, checked on the reporter's mouse), Ardor Gaming Phantom Pro 3554:F5C4 (#181) / Phantom Pro V2 3554:F52D
+//!   (#185), and Force One Phantom PRO: wireless receiver 3554:F5CC / USB 3554:F5CA (issue supplied by the reporter; both expose FF02:0002). A receiver that does not speak the protocol gives no checksummed reply and is
 //!   asked again only once a minute.
 //!
 //! Implemented here from those facts. On interface 1, vendor collection FF02:0002 (17-byte input and
@@ -52,7 +52,7 @@ struct Product {
     cable: bool,
 }
 
-const PRODUCTS: [Product; 13] = [
+const PRODUCTS: [Product; 15] = [
     Product { vid: 0x3554, pid: 0xF5F7, name: "Scyrox V6 / V8", key: "scyrox:v6v8", cable: false },
     Product { vid: 0x3554, pid: 0xF5F6, name: "Scyrox V6 / V8", key: "scyrox:v6v8", cable: true },
     Product { vid: 0x373B, pid: 0x101B, name: "ATK 8K mouse", key: "compx:373b:101b", cable: false },
@@ -73,6 +73,9 @@ const PRODUCTS: [Product; 13] = [
     // "Wireless mouse 8k NANO dongle-L" (ATK ZERO, #204): Joule (github.com/DillanCidral/Joule,
     // CompxProvider.cs) reads it with this frame, confirmed on an A9 Ultra V2; also in BatteryTray.
     Product { vid: 0x373B, pid: 0x11FE, name: "ATK 8K mouse", key: "compx:373b:11fe", cable: false },
+    // Force One Phantom PRO: the 2.4 GHz receiver and wired identity share the same FF02:0002 battery protocol.
+    Product { vid: 0x3554, pid: 0xF5CC, name: "Force One Phantom PRO", key: "compx:3554:f5cc", cable: false },
+    Product { vid: 0x3554, pid: 0xF5CA, name: "Force One Phantom PRO", key: "compx:3554:f5cc", cable: true },
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -241,5 +244,11 @@ mod tests {
     #[test]
     fn only_listed_ids() {
         assert!(PRODUCTS.iter().all(|p| !(p.vid == 0x3554 && (p.pid == 0xFA09 || p.pid == 0xFB40))));
+        let phantom_wireless = PRODUCTS.iter().find(|p| p.vid == 0x3554 && p.pid == 0xF5CC).unwrap();
+        let phantom_wired = PRODUCTS.iter().find(|p| p.vid == 0x3554 && p.pid == 0xF5CA).unwrap();
+        assert_eq!(phantom_wireless.name, "Force One Phantom PRO");
+        assert!(!phantom_wireless.cable);
+        assert!(phantom_wired.cable);
+        assert_eq!(phantom_wireless.key, phantom_wired.key);
     }
 }
