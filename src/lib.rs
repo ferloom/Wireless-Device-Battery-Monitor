@@ -20,6 +20,7 @@ pub mod report;
 pub mod report_window;
 pub mod settings;
 pub mod stats;
+pub mod sysmon;
 pub mod tray_probe;
 pub mod ui;
 pub mod update;

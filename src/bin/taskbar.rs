@@ -41,6 +41,8 @@ const WM_UPDATE_DOWNLOADED: u32 = WM_APP + 6;
 const WM_SHOW_UPDATED: u32 = WM_APP + 7;
 /// tray_probe found where a secondary taskbar's notification area begins.
 const WM_TRAY_PROBED: u32 = WM_APP + 8;
+
+const WM_SYS_DONE: u32 = WM_APP + 30;
 /// Another window came to the front: copies over a full-screen window step aside at once.
 const WM_FOREGROUND: u32 = WM_APP + 20;
 /// A background write of the history finished (wparam: 1 = written).
@@ -233,6 +235,7 @@ const ID_ICONS_MODE: usize = 10;
 const ID_VERSIONS: usize = 11;
 const ID_DASHBOARD: usize = 12;
 const ID_COMPACT: usize = 13;
+const ID_SYSTEM_STATS: usize = 14;
 const _: () = assert!(ID_INTERVAL_BASE > ID_ON_CHANGE && ID_INTERVAL_BASE + INTERVALS.len() <= ID_MONITOR_ALL, "menu ids overlap");
 /// "Show widget on": all monitors, main monitor only, or ID_MONITOR_FIRST + i for one other monitor.
 const ID_MONITOR_ALL: usize = 40;
@@ -559,6 +562,8 @@ struct App {
     /// "Show the icon when no device is connected" turned off: nothing on the strip then, and the
     /// app's own notification-area icon (APP_UID) holds the menu.
     hide_empty: bool,
+    /// "Show CPU, GPU and RAM": the system sensors of sysmon.rs on the strip (default on).
+    sys_enabled: bool,
     app_icon: Option<HICON>,
     compact: bool,
     /// Version the setup just updated from (shown once in "Update finished").
@@ -1363,6 +1368,10 @@ fn custom_ring_piece(dev: Option<usize>, key: &str, d: i32, thick: f32, frac: f3
 }
 
 fn device_icon(d: &DeviceStatus, font: HFONT, light: bool) -> Mask {
+    // The system sensors (CPU, GPU, RAM) are drawn as their name in text, not as an icon.
+    if d.is_system() {
+        return mask(&d.name, font, light);
+    }
     if d.kind != DeviceKind::Earbuds {
         return mask(&d.kind.glyph().to_string(), font, light);
     }
@@ -1871,8 +1880,9 @@ impl App {
             let alpha = if d.asleep { 120 } else { 255 };
             // Red at or below this device's own warning level (right-click menu, default 15%);
             // earbuds by each bud's own level. The icon too when the device's menu asks for it.
+            // The system sensors have no battery: their percent is the load, never "low".
             let threshold = settings::threshold(SETTINGS_KEY, &d.key);
-            let low = settings::is_low(d, threshold);
+            let low = !d.is_system() && settings::is_low(d, threshold);
             let buds_low = settings::buds_low(d, threshold);
             let red_icon = settings::red_icon(SETTINGS_KEY, &d.key);
             let tint = |on: bool| if on { red } else { fg };
@@ -1883,7 +1893,7 @@ impl App {
             let bolt_color = ui::bolt_color(d, light);
             let mark = bolt_color.is_some();
             let glow = settings::glow(SETTINGS_KEY, &d.key);
-            if self.ring && d.percent >= 0 {
+            if self.ring && d.percent >= 0 && !d.is_system() {
                 // Ring style: the icon inside a ring filled clockwise to the level. On power the
                 // top segment moves aside (with round ends), the unfilled remainder fades away and
                 // a bolt takes the gap; unplugging plays the same animation backwards.
@@ -1975,6 +1985,11 @@ impl App {
                 }
             };
             pieces.push(piece);
+            // The system sensors show their temperature beside the load, red when hot.
+            if d.is_system() && d.temp >= 0 {
+                let hot = d.temp >= batteryhub::sysmon::HOT_C;
+                pieces.push(Piece::new(Some(i), mask(&format!("{}°", d.temp), text, light), tint(hot), alpha, 0));
+            }
             if badge_fade > 0.0 {
                 let a = (alpha as f32 * badge_fade).round() as u32;
                 if let Some(b) = badge_piece(Some(i), &d.via, &d.name, d.hw.map(|h| h.0), badge_icon_font, light, a, px(2.0)) {
@@ -4384,7 +4399,9 @@ impl App {
         } else {
             String::new()
         };
-        format!("{}: {level}{state}", d.name)
+        // The system sensors also say their temperature: "CPU: 87% · 65 °C".
+        let temp = if d.is_system() && d.temp >= 0 { format!(" · {} °C", d.temp) } else { String::new() };
+        format!("{}: {level}{state}{temp}", d.name)
     }
 
     /// Mouse at (x, y) on a strip: the device under it (along x, or along y on a vertical taskbar).
@@ -4401,6 +4418,12 @@ impl App {
         let hit = self.view(on).and_then(|v| v.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| (h.2, h.0, h.1)));
         let mode = hit.and_then(|h| self.visible_at(h.0)).map_or(settings::HoverMode::Card, |d| settings::hover_mode(SETTINGS_KEY, &d.key));
         let mode = hover_card_mode(mode);
+        // The system sensors have no battery history: their hover shows the short tooltip.
+        let mode = if hit.and_then(|h| self.visible_at(h.0)).is_some_and(|d| d.is_system()) {
+            settings::HoverMode::Tip
+        } else {
+            mode
+        };
         // "Card on click": passing the mouse over the device must not open the card.
         let card_click = hit.and_then(|h| self.visible_at(h.0)).is_some_and(|d| settings::card_on_click(SETTINGS_KEY, &d.key));
         // Mouse on the strip: the card stays, whatever it was opened by. Cancel the away timer
@@ -4680,6 +4703,9 @@ impl App {
         self.canonicalize(&mut fresh);
         let keys: HashSet<String> = fresh.iter().map(|s| s.key.clone()).collect();
         self.devices.retain(|k, t| {
+            if t.status.is_system() {
+                return true; // the system sensors are not battery devices: sysmon keeps them up
+            }
             if self.merged.contains_key(k) {
                 return false; // a joined connection is now part of its target (#644)
             }
@@ -5233,6 +5259,9 @@ impl App {
         //  * Bluetooth / BLE / XInput devices are only reported while connected, so missing
         //    means disconnected: removed at once.
         self.devices.retain(|k, t| {
+            if t.status.is_system() {
+                return true; // the system sensors are not battery devices: sysmon keeps them up
+            }
             if self.merged.contains_key(k) {
                 return false; // a joined connection is now part of its target (#644)
             }
@@ -5258,6 +5287,44 @@ impl App {
             self.start_poll();
         }
     }
+
+    /// The system sensors' readings arrived (sysmon.rs): keep the CPU / GPU / RAM items on the
+    /// strip up to date, and drop the ones that stopped being measured (the GPU item is only
+    /// there while a GPU load is known, the temperature when Windows reports one).
+    fn on_sys_result(&mut self, fresh: Vec<DeviceStatus>) {
+        if !self.sys_enabled {
+            return;
+        }
+        let now = Instant::now();
+        let keys: HashSet<String> = fresh.iter().map(|s| s.key.clone()).collect();
+        let gone: Vec<String> = self
+            .devices
+            .keys()
+            .filter(|k| k.starts_with(batteryhub::sysmon::SYS_PREFIX) && !keys.contains(*k))
+            .cloned()
+            .collect();
+        for k in gone {
+            self.devices.remove(&k);
+            self.order.retain(|o| o != &k);
+        }
+        for mut s in fresh {
+            if !self.order.contains(&s.key) {
+                self.order.push(s.key.clone());
+                self.reordered = true;
+            }
+            let reported = self.devices.get(&s.key).map(|t| t.reported.clone()).unwrap_or_else(|| s.name.clone());
+            s.name = self.names.get(&s.key).cloned().unwrap_or(reported.clone());
+            self.devices.insert(s.key.clone(), Tracked { status: s, seen: now, reported });
+        }
+        self.paint();
+    }
+
+    /// "Show CPU, GPU and RAM" turned off: the sensor items pop out of the strip.
+    fn remove_sys(&mut self) {
+        self.devices.retain(|k, _| !k.starts_with(batteryhub::sysmon::SYS_PREFIX));
+        self.order.retain(|k| !k.starts_with(batteryhub::sysmon::SYS_PREFIX));
+        self.paint();
+    }
 }
 
 impl App {
@@ -5277,6 +5344,7 @@ impl App {
         self.connection_icons = batteryhub::util::reg_get_dword(SETTINGS_KEY, "ConnectionIcons").unwrap_or(0) != 0;
         settings::ORDER_LOCKED.store(self.lock_order, std::sync::atomic::Ordering::Relaxed);
         self.hide_empty = batteryhub::util::reg_get_dword(SETTINGS_KEY, "HideWhenEmpty").unwrap_or(0) != 0;
+        self.sys_enabled = batteryhub::util::reg_get_dword(SETTINGS_KEY, "SystemStats").is_none_or(|v| v != 0);
         self.offset_y = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffsetY").unwrap_or(0) as i32;
         self.background = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetBackground").unwrap_or(0) != 0;
         self.icons_mode = batteryhub::util::reg_get_dword(SETTINGS_KEY, "NotificationIcons").unwrap_or(0) != 0;
@@ -5998,6 +6066,8 @@ unsafe fn show_menu(from: Option<HWND>) {
                     ID_COMPACT,
                     &windows::core::HSTRING::from(tr("Icons above percentages (narrower)")),
                 );
+                let sys = with_app(|a| a.sys_enabled).unwrap_or(false);
+                let _ = AppendMenuW(widget, MF_STRING | check(sys), ID_SYSTEM_STATS, &windows::core::HSTRING::from(tr("Show CPU, GPU and RAM")));
                 if let Ok(sub) = CreatePopupMenu() {
                     let mut checked = ID_POSITION_CUSTOM;
                     for (i, px) in POSITION_OFFSETS.iter().enumerate() {
@@ -6381,6 +6451,18 @@ unsafe fn show_menu(from: Option<HWND>) {
                         a.background = !a.background;
                         save_dword("WidgetBackground", a.background as u32);
                         a.paint();
+                    });
+                }
+                ID_SYSTEM_STATS => {
+                    with_app(|a| {
+                        a.sys_enabled = !a.sys_enabled;
+                        save_dword("SystemStats", a.sys_enabled as u32);
+                        batteryhub::sysmon::set_enabled(a.sys_enabled);
+                        if a.sys_enabled {
+                            a.paint();
+                        } else {
+                            a.remove_sys();
+                        }
                     });
                 }
                 id if (ID_POSITION_FIRST..ID_POSITION_FIRST + POSITION_OFFSETS.len()).contains(&id) => {
@@ -7147,6 +7229,12 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 trim_memory();
                 LRESULT(0)
             }
+            WM_SYS_DONE => {
+                // The system sensors (CPU, GPU, RAM) read again: sysmon.rs's own thread.
+                let devices = ui::take_result(lp);
+                with_app(|a| a.on_sys_result(devices));
+                LRESULT(0)
+            }
             WM_TIMER if wp.0 == TIMER_CARD => {
                 // Animation frames: no memory trim here (it runs ~60 times a second for 0.15 s).
                 with_app(|a| a.card_step());
@@ -7487,6 +7575,10 @@ fn main() {
             }
             a.bt_sig = batteryhub::drivers::bluetooth::connection_signature();
             a.start_poll();
+            batteryhub::sysmon::init(main, WM_SYS_DONE);
+            if a.sys_enabled {
+                batteryhub::sysmon::set_enabled(true);
+            }
         });
         SetTimer(Some(main), TIMER_POLL, refresh_minutes() * 60_000, None);
         SetTimer(Some(main), TIMER_PLACE, 1000, None);
