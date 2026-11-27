@@ -20,8 +20,7 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER,
-    PDH_HQUERY,
+    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
 };
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::GetSystemTimes;
@@ -220,19 +219,36 @@ impl Pdh {
         }
     }
 
-    /// The counter's value since the previous collect. Several instances (every GPU engine,
+    /// The counters' values since the previous collect. Several instances (every GPU engine,
     /// every thermal zone) are combined: load adds up, temperatures take the highest.
     fn value(&self, temperature: bool) -> Option<i32> {
-        let mut v = PDH_FMT_COUNTERVALUE::default();
+        let mut size = 0u32;
+        let mut count = 0u32;
+        let mut best: Option<f64> = None;
         unsafe {
-            if PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut v) != 0 {
+            // The first call without a buffer only reports the needed size (PDH_MORE_DATA).
+            if PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut size, &mut count, None) != PDH_MORE_DATA {
                 return None;
             }
+            let mut buf = vec![0u8; size as usize];
+            if PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut size, &mut count, Some(buf.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W)) != 0 {
+                return None;
+            }
+            let stride = size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+            for i in 0..count as usize {
+                let item: PDH_FMT_COUNTERVALUE_ITEM_W = std::ptr::read_unaligned(buf.as_ptr().add(i * stride) as *const _);
+                let x = item.FmtValue.Anonymous.doubleValue;
+                if !x.is_finite() {
+                    continue;
+                }
+                best = Some(match best {
+                    Some(b) if temperature => b.max(x),
+                    Some(b) => b + x,
+                    None => x,
+                });
+            }
         }
-        let x = unsafe { v.Anonymous.doubleValue };
-        if !x.is_finite() {
-            return None;
-        }
+        let x = best?;
         if temperature {
             // Kelvin in tenths -> Celsius.
             Some(((x / 10.0 - 273.15).round() as i32).clamp(-10, 110))
