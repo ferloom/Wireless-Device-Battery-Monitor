@@ -6827,6 +6827,9 @@ fn separate_device(key: &str) {
         }
     });
     reload_after_merge();
+    // The joined connection was removed from the strip while merged. Read again right away so both
+    // devices appear at once instead of waiting for the next interval.
+    with_app(|a| a.manual_refresh(true));
 }
 
 fn reload_after_merge() {
