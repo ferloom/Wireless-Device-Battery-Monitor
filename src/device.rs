@@ -17,6 +17,8 @@ pub enum DeviceKind {
     Microphone,
     /// In-ear headphones (a left and a right bud).
     Earbuds,
+    /// A speaker (e.g. a portable Bluetooth box). Append new kinds: this is serialised by number.
+    Speaker,
 }
 
 impl DeviceKind {
@@ -25,6 +27,7 @@ impl DeviceKind {
         match self {
             DeviceKind::Mouse => '\u{E962}',
             DeviceKind::Headset | DeviceKind::Earbuds => '\u{E7F6}',
+            DeviceKind::Speaker => '\u{E7F5}',
             DeviceKind::Keyboard => '\u{E765}',
             DeviceKind::Gamepad => '\u{E7FC}',
             DeviceKind::Phone => '\u{E8EA}',
@@ -47,6 +50,7 @@ impl DeviceKind {
             DeviceKind::Phone => n_("Phone"),
             DeviceKind::Microphone => n_("Microphone"),
             DeviceKind::Earbuds => n_("Earbuds"),
+            DeviceKind::Speaker => n_("Speaker"),
             DeviceKind::Other => n_("Device"),
         }
     }
@@ -617,6 +621,7 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
     drivers::eweadn_x23::poll(&mut ctx);
     drivers::playstation::poll(&mut ctx);
     drivers::steam::poll(&mut ctx); // listen-only; up to 5 s per live puck slot on a full read
+    drivers::moto_buds::poll(&mut ctx);
     drivers::airpods::poll(&mut ctx);
     drivers::bluetooth::poll(&mut ctx);
     drivers::generic::poll(&mut ctx);

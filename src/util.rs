@@ -61,7 +61,10 @@ pub fn guess_kind(name: &str) -> DeviceKind {
     if !has("max") && ["buds", "pods", "wf-", "earphone", "in-ear"].iter().any(|s| has(s)) {
         return DeviceKind::Earbuds;
     }
-    if ["head", "buds", "pods", "ear", "wh-", "wf-", "audio", "speaker", "arctis", "cloud", "void", "virtuoso"].iter().any(|s| has(s)) {
+    if has("speaker") || has("głośnik") {
+        return DeviceKind::Speaker;
+    }
+    if ["head", "buds", "pods", "ear", "wh-", "wf-", "audio", "arctis", "cloud", "void", "virtuoso"].iter().any(|s| has(s)) {
         return DeviceKind::Headset;
     }
     DeviceKind::Other

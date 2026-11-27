@@ -201,7 +201,7 @@ pub fn ensure_watcher() -> bool {
 // ---- GATT Battery Service (phones) --------------------------------------------------------------
 
 /// Waits up to `ms` for a WinRT operation; cancels it when it takes longer.
-fn wait<T: windows::core::RuntimeType + 'static>(op: windows_future::IAsyncOperation<T>, ms: u64) -> Option<T> {
+pub(crate) fn wait<T: windows::core::RuntimeType + 'static>(op: windows_future::IAsyncOperation<T>, ms: u64) -> Option<T> {
     use windows_future::AsyncStatus;
     let end = Instant::now() + std::time::Duration::from_millis(ms);
     loop {

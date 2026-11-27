@@ -46,6 +46,7 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("nl", include_str!("../lang/nl.txt")),
     ("pl", include_str!("../lang/pl.txt")),
     ("pt-BR", include_str!("../lang/pt-BR.txt")),
+    ("ro", include_str!("../lang/ro.txt")),
     ("ru", include_str!("../lang/ru.txt")),
     ("sv", include_str!("../lang/sv.txt")),
     ("th", include_str!("../lang/th.txt")),
@@ -461,6 +462,7 @@ mod tests {
         assert_eq!(pick("zh-Hant-HK", &codes), "zh-TW");
         assert_eq!(pick("zh-SG", &codes), "zh-CN");
         assert_eq!(pick("de-AT", &codes), "de");
+        assert_eq!(pick("ro-RO", &codes), "ro");
         assert_eq!(pick("fi-FI", &codes), "en");
     }
 
@@ -471,7 +473,7 @@ mod tests {
         assert_eq!(with_separator("12", ','), "12");
         assert_eq!(with_separator("3.9", '.'), "3.9");
         // Comma where it is the norm, the default dot elsewhere; every file says which.
-        const COMMA: [&str; 15] = ["cs", "de", "es", "fr", "hu", "id", "it", "nl", "pl", "pt-BR", "ru", "sv", "tr", "uk", "vi"];
+        const COMMA: [&str; 16] = ["cs", "de", "es", "fr", "hu", "id", "it", "nl", "pl", "pt-BR", "ro", "ru", "sv", "tr", "uk", "vi"];
         for (code, src) in BUILT_IN {
             let want = if COMMA.contains(code) { "," } else { "." };
             assert_eq!(parse(src).decimal, want, "@decimal of lang/{code}.txt");

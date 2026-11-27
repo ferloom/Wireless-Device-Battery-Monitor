@@ -56,6 +56,14 @@ fn strip_service_suffix(n: String) -> String {
     n
 }
 
+/// Portable speakers (e.g. the JBL Go 3, which only speaks A2DP/AVRCP) do not give Windows a
+/// battery level. Show them anyway, as a speaker with an unknown ("?") level, instead of dropping
+/// them just because there is no level property.
+fn is_portable_speaker(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("jbl go 3") || n.contains("jbl go3") || n.contains("speaker") || n.contains("głośnik")
+}
+
 /// Vendor drivers (AirPods, ...) also say "Bluetooth"; dedupe them by name, our own entries by key.
 fn is_duplicate(candidate: &DeviceStatus, existing: &[DeviceStatus]) -> bool {
     existing.iter().any(|o| o.key == candidate.key || (!o.key.starts_with("bt:") && o.name == candidate.name))
@@ -124,6 +132,7 @@ pub fn poll(ctx: &mut PollContext) {
     // LE addresses first: a phone's Battery Service is read over LE.
     let mut container_le: BTreeMap<String, u64> = BTreeMap::new();
     let mut battery: BTreeMap<String, Found> = BTreeMap::new();
+    let mut speakers: BTreeSet<String> = BTreeSet::new();
 
     // Only the classic and LE root nodes supply connection state and phone addresses.
     let [classic, le, services] = &sets;
@@ -141,6 +150,9 @@ pub fn poll(ctx: &mut PollContext) {
         let cid = n.container().unwrap_or_else(|| inst.clone());
         let name = n.string(&DEVPKEY_Device_FriendlyName).or_else(|| n.string(&DEVPKEY_Device_DeviceDesc)).unwrap_or_default();
         if inst.starts_with("BTHENUM\\DEV_") || inst.starts_with("BTHLE\\DEV_") {
+            if is_portable_speaker(&name) {
+                speakers.insert(cid.clone());
+            }
             container_name.insert(cid.clone(), name.clone());
             if let Some(a) = bt_address(inst) {
                 container_addr.insert(cid.clone(), a);
@@ -216,16 +228,19 @@ pub fn poll(ctx: &mut PollContext) {
     }
 
     let (mut watching, mut waited) = (false, false);
-    for (cid, f) in &battery {
+    // A speaker without a battery property still gets an entry (with an unknown level).
+    let cids: BTreeSet<&String> = battery.keys().chain(speakers.iter()).collect();
+    for cid in cids {
         if reported.contains(cid) {
             continue;
         }
-        let connected = container_conn.get(cid).copied().unwrap_or(f.connected);
+        let found = battery.get(cid);
+        let connected = container_conn.get(cid).copied().unwrap_or_else(|| found.map(|f| f.connected).unwrap_or(speakers.contains(cid)));
         if !connected {
             continue;
         }
         let mut s = DeviceStatus { key: format!("bt:{cid}"), ..Default::default() };
-        s.name = container_name.get(cid).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| f.name.clone());
+        s.name = container_name.get(cid).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| found.map(|f| f.name.clone()).unwrap_or_default());
         if s.name.is_empty() {
             s.name = "Bluetooth device".into();
         }
@@ -233,7 +248,7 @@ pub fn poll(ctx: &mut PollContext) {
             continue;
         }
         s.via = "Bluetooth".into();
-        s.percent = f.pct as i32;
+        s.percent = found.map(|f| f.pct as i32).unwrap_or(-1);
         s.kind = container_cod.get(cid).map(|&c| kind_from_class_of_device(c)).unwrap_or_default();
         if s.kind == DeviceKind::Other
             && let Some(cat) = container_cat.get(cid)
@@ -249,7 +264,9 @@ pub fn poll(ctx: &mut PollContext) {
         if s.kind == DeviceKind::Other {
             s.kind = guess_kind(&s.name);
         }
-        if s.kind == DeviceKind::Headset
+        if speakers.contains(cid) {
+            s.kind = DeviceKind::Speaker; // a portable box is not a headset, even with CoD audio
+        } else if s.kind == DeviceKind::Headset
             && let Some(&addr) = container_addr.get(cid)
         {
             let mut just_started = false;
@@ -274,5 +291,30 @@ pub fn poll(ctx: &mut PollContext) {
         }
         ctx.out.push(s);
         ctx.bt_containers.insert(cid.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_speakers_are_detected() {
+        assert!(is_portable_speaker("JBL Go 3"));
+        assert!(is_portable_speaker("JBL Go 3 Stereo"));
+        assert!(is_portable_speaker("JBL GO3"));
+        assert!(is_portable_speaker("My Bluetooth speaker"));
+        assert!(is_portable_speaker("Głośnik JBL"));
+        assert!(!is_portable_speaker("JBL Quantum 800"));
+        assert!(!is_portable_speaker("JBL Flip 5"));
+    }
+
+    #[test]
+    fn audio_class_is_a_speaker_only_for_boxes() {
+        assert_eq!(kind_from_class_of_device(0x00240414), DeviceKind::Headset); // CoD audio
+        assert_eq!(guess_kind("JBL Go 3"), DeviceKind::Other); // name alone does not say it
+        assert_eq!(guess_kind("JBL Go 3 Speaker"), DeviceKind::Speaker);
+        assert_eq!(DeviceKind::Speaker.glyph(), '\u{E7F5}');
+        assert_eq!(DeviceKind::Speaker.label_en(), crate::i18n::n_("Speaker"));
     }
 }

@@ -286,3 +286,4 @@ Mirror other widgets is on.\n\nThe widgets on all your taskbars now look and beh
 Mirror other widgets is off.\n\nEach taskbar's widget is now on its own: right-click the widget on a monitor to change its position and height there, and drag its devices into an order of its own. What you set on one taskbar no longer changes the others. Each widget starts where it is now. = 「與其他小工具保持一致」已關閉。\n\n現在每個工作列的小工具各自獨立：在某個螢幕的小工具上按右鍵即可變更它在那裡的位置和高度，並把它的裝置拖成自己的順序。在一個工作列上的設定不再改變其他工作列。每個小工具從它目前的位置開始。
 Not enough room on the taskbar of {monitor} = {monitor} 的工作列空間不足
 The widget is hidden on that taskbar until there is room again. You can also move it: right-click it → Widget position. = 在該工作列有空間之前，小工具會隱藏。你也可以移動它：在它上面按右鍵 → 小工具位置。
+Speaker = 喇叭

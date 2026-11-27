@@ -107,6 +107,7 @@ pub fn decode_status(line: &str) -> Option<(DeviceStatus, String)> {
         5 => DeviceKind::Phone,
         6 => DeviceKind::Microphone,
         7 => DeviceKind::Earbuds,
+        8 => DeviceKind::Speaker,
         _ => DeviceKind::Other,
     };
     let hw = f[13].split_once(':').and_then(|(v, p)| Some((u16::from_str_radix(v, 16).ok()?, u16::from_str_radix(p, 16).ok()?)));
