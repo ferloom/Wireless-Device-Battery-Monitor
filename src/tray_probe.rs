@@ -24,6 +24,33 @@ const REFRESH: Duration = Duration::from_secs(60);
 /// A first answer normally takes well under a second; after this, give up waiting for it.
 const FIRST_WAIT: Duration = Duration::from_secs(2);
 const TRAY_ID: &str = "SystemTrayIcon";
+/// A couple of pixels of slack for rounded UI Automation rectangles.
+const EDGE_TOLERANCE: i32 = 2;
+
+/// Leftmost (topmost on a vertical taskbar) *visible* `SystemTrayIcon` rectangle that actually lies
+/// on `bar`. Windows 11 can expose collapsed or off-screen tray icons with rectangles far from the
+/// clock; treating one of those as the start of the notification area would make the widget think
+/// there is no room beside a taskbar that has plenty.
+fn best_tray_edge(rects: &[(RECT, bool)], bar: RECT, vertical: bool) -> Option<i32> {
+    rects
+        .iter()
+        .filter(|(_, offscreen)| !offscreen)
+        .map(|(b, _)| b)
+        .filter(|b| b.right > b.left && b.bottom > b.top)
+        .filter(|b| {
+            if vertical {
+                b.top < bar.bottom && b.bottom > bar.top
+                    && b.left >= bar.left - EDGE_TOLERANCE
+                    && b.right <= bar.right + EDGE_TOLERANCE
+            } else {
+                b.left < bar.right && b.right > bar.left
+                    && b.top >= bar.top - EDGE_TOLERANCE
+                    && b.bottom <= bar.bottom + EDGE_TOLERANCE
+            }
+        })
+        .map(|b| if vertical { b.top } else { b.left })
+        .min()
+}
 
 /// Where a taskbar's notification area begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +105,7 @@ pub fn tray_left(bar: HWND, bar_rect: RECT, notify: HWND, msg: u32) -> TrayEdge 
     if stale && !BUSY.swap(true, Ordering::SeqCst) {
         let notify = notify.0 as isize;
         std::thread::spawn(move || {
-            let from_right = probe(key, vertical).filter(|x| *x > lo && *x < hi).map(|x| hi - x);
+            let from_right = probe(key, bar_rect, vertical).filter(|x| *x > lo && *x < hi).map(|x| hi - x);
             {
                 let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
                 let c = g.get_or_insert_with(Cache::default);
@@ -107,26 +134,23 @@ pub fn taskbars_changed() {
 }
 
 /// Leftmost (topmost when `vertical`) `SystemTrayIcon` element under the taskbar window `bar`.
-fn probe(bar: isize, vertical: bool) -> Option<i32> {
+fn probe(bar: isize, bar_rect: RECT, vertical: bool) -> Option<i32> {
     unsafe {
         let init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
         let found = (|| -> windows::core::Result<Option<i32>> {
             let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
             let root = uia.ElementFromHandle(HWND(bar as *mut _))?;
             let all = root.FindAll(TreeScope_Descendants, &uia.CreateTrueCondition()?)?;
-            let mut best: Option<i32> = None;
+            let mut rects = Vec::new();
             for i in 0..all.Length()? {
                 let e = all.GetElement(i)?;
                 if e.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default() != TRAY_ID {
                     continue;
                 }
-                let b = e.CurrentBoundingRectangle()?;
-                if b.right > b.left && b.bottom > b.top {
-                    let edge = if vertical { b.top } else { b.left };
-                    best = Some(best.map_or(edge, |x| x.min(edge)));
-                }
+                let offscreen = e.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false);
+                rects.push((e.CurrentBoundingRectangle()?, offscreen));
             }
-            Ok(best)
+            Ok(best_tray_edge(&rects, bar_rect, vertical))
         })();
         if init {
             CoUninitialize();
@@ -348,6 +372,11 @@ fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
                 if e.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false) {
                     continue;
                 }
+                // UI Automation also exposes XAML elements reaching outside the taskbar window.
+                // They are not buttons competing for the widget's place.
+                if b.right <= rb.left || b.left >= rb.right || b.bottom <= rb.top || b.top >= rb.bottom {
+                    continue;
+                }
                 let id = e.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
                 let class = e.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
                 // Our own widget (whatever its class reads as) never counts as something in its way.
@@ -378,6 +407,18 @@ fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_edge_ignores_offscreen_and_outside_rectangles() {
+        let bar = RECT { left: 0, top: 1000, right: 1920, bottom: 1048 };
+        let visible = (RECT { left: 1800, top: 1004, right: 1840, bottom: 1044 }, false);
+        let clock = (RECT { left: 1850, top: 1004, right: 1910, bottom: 1044 }, false);
+        let collapsed = (RECT { left: 0, top: 1004, right: 20, bottom: 1044 }, true);
+        let outside = (RECT { left: 500, top: 2000, right: 540, bottom: 2040 }, false);
+        assert_eq!(best_tray_edge(&[clock, visible], bar, false), Some(1800));
+        assert_eq!(best_tray_edge(&[collapsed, visible, outside], bar, false), Some(1800));
+        assert_eq!(best_tray_edge(&[collapsed, outside], bar, false), None);
+    }
 
     #[test]
     fn end_of_the_icons() {

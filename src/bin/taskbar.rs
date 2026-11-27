@@ -2775,6 +2775,13 @@ impl App {
         }
     }
 
+    /// Drops the last room answer for `bar`. A placement that could not be decided (UI Automation
+    /// still pending, taskbar hidden by a game, copy not rendered yet...) must not leave an old
+    /// "no room" behind for this tick to announce.
+    fn forget_room(&self, bar: HWND) {
+        self.rooms.borrow_mut().remove(&(bar.0 as isize));
+    }
+
     /// No taskbar the widget is shown on has room beside its task buttons: the levels move to
     /// notification-area icons (said once in a notification) until one has room again.
     fn sync_crowded(&mut self) {
@@ -3159,6 +3166,7 @@ impl App {
             // A copy is a topmost window of its own: it must not stay over a full-screen game or
             // video on that monitor (the taskbar itself goes behind those).
             if fullscreen_over(bar) {
+                self.forget_room(bar);
                 if IsWindowVisible(strip).as_bool() {
                     let _ = ShowWindow(strip, SW_HIDE);
                 }
@@ -3169,11 +3177,15 @@ impl App {
             let dpi = GetDpiForWindow(bar);
             let s = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
             // Its own render: its own size, for its own taskbar's orientation.
-            let Some(size) = self.view(strip).filter(|v| v.size.cx > 0).map(|v| v.size) else { return true };
+            let Some(size) = self.view(strip).filter(|v| v.size.cx > 0).map(|v| v.size) else {
+                self.forget_room(bar);
+                return true;
+            };
             if br.bottom - br.top > br.right - br.left {
                 // A vertical taskbar (left / right): like the main one, just above its clock and
                 // centred across its width.
                 if !self.strip_vertical(strip) {
+                    self.forget_room(bar);
                     return true; // rendered for a horizontal one: drawn again first
                 }
                 dbg_log(&format!("mirror: vertical bar {bar:?} rect {},{},{},{} main vertical {}", br.left, br.top, br.right, br.bottom, self.vertical));
@@ -3187,7 +3199,10 @@ impl App {
                     // Automation where its notification-area items start, as for horizontal ones.
                     _ => match batteryhub::tray_probe::tray_left(bar, br, self.main, WM_TRAY_PROBED) {
                         batteryhub::tray_probe::TrayEdge::Known(y) => y,
-                        batteryhub::tray_probe::TrayEdge::Pending => return true,
+                        batteryhub::tray_probe::TrayEdge::Pending => {
+                            self.forget_room(bar);
+                            return true;
+                        }
                         batteryhub::tray_probe::TrayEdge::Unknown => br.bottom - (130.0 * s) as i32,
                     },
                 };
@@ -3201,7 +3216,7 @@ impl App {
                 let mut client = RECT::default();
                 let _ = GetClientRect(bar, &mut client);
                 let left = ((client.right - size.cx) / 2).max(0);
-                self.rooms.borrow_mut().remove(&(bar.0 as isize));
+                self.forget_room(bar);
                 self.show_mirror_at(bar, strip, left, top.max(0), size);
                 return false;
             }
@@ -3233,13 +3248,19 @@ impl App {
                         batteryhub::tray_probe::TrayEdge::Known(x) => x,
                         // Not known yet (well under a second): stay hidden rather than show the copy in
                         // the wrong place; WM_TRAY_PROBED places it as soon as the answer is there.
-                        batteryhub::tray_probe::TrayEdge::Pending => return true,
+                        batteryhub::tray_probe::TrayEdge::Pending => {
+                            self.forget_room(bar);
+                            return true;
+                        }
                         batteryhub::tray_probe::TrayEdge::Unknown => br.right - (130.0 * s) as i32,
                     },
                 }
             };
             let lay = self.layout_of(strip);
-            let Some(left) = self.widget_left(bar, br, right, size.cx, s, &lay) else { return true };
+            let Some(left) = self.widget_left(bar, br, right, size.cx, s, &lay) else {
+                self.forget_room(bar);
+                return true;
+            };
             let mut client = RECT::default();
             let _ = GetClientRect(bar, &mut client);
             let top = ((client.bottom - size.cy) / 2).max(0);
@@ -3435,16 +3456,19 @@ impl App {
         // the same moment): a shown widget keeps following its place while a copy's is not known
         // yet (it moved only on the other monitor after a position change).
         if self.strip.0.is_null() || self.primary_hidden || (!self.mirrors_ready && unsafe { !IsWindowVisible(self.strip).as_bool() }) {
+            self.forget_room(self.taskbar);
             return;
         }
         unsafe {
             if self.strip_popup && (fullscreen_over(self.taskbar) || !IsWindowVisible(self.taskbar).as_bool()) {
+                self.forget_room(self.taskbar);
                 if IsWindowVisible(self.strip).as_bool() {
                     let _ = ShowWindow(self.strip, SW_HIDE);
                 }
                 return;
             }
             let Ok(tray) = FindWindowExW(Some(self.taskbar), None, w!("TrayNotifyWnd"), None) else {
+                self.forget_room(self.taskbar);
                 return;
             };
             let (mut tr, mut bar) = (RECT::default(), RECT::default());
@@ -3462,13 +3486,16 @@ impl App {
                 }
                 let top = top.max(0);
                 let left = ((client.right - self.mv.size.cx) / 2).max(0);
-                self.rooms.borrow_mut().remove(&(self.taskbar.0 as isize));
+                self.forget_room(self.taskbar);
                 self.place_strip_at(left, top, (tr, bar, top));
                 return;
             }
             // Placed as soon as UI Automation has told where the taskbar's items are.
             let lay = self.main_layout();
-            let Some(left) = self.widget_left(self.taskbar, bar, tr.left, self.mv.size.cx, self.scale(), &lay) else { return };
+            let Some(left) = self.widget_left(self.taskbar, bar, tr.left, self.mv.size.cx, self.scale(), &lay) else {
+                self.forget_room(self.taskbar);
+                return;
+            };
             let mut client = RECT::default();
             let _ = GetClientRect(self.taskbar, &mut client);
             let top = ((client.bottom - self.mv.size.cy) / 2).max(0);
@@ -7717,6 +7744,14 @@ mod tests {
         );
         assert_eq!(first_unasked_pair(&keys, |_, _| true), None);
         assert_eq!(first_unasked_pair(&keys[..1], |_, _| false), None);
+    }
+
+    #[test]
+    fn stale_room_answer_is_forgotten_when_placement_is_skipped() {
+        let app = App::default();
+        app.rooms.borrow_mut().insert(42, false);
+        app.forget_room(HWND(42 as *mut _));
+        assert!(app.rooms.borrow().is_empty());
     }
 
     #[test]
