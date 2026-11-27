@@ -172,7 +172,7 @@ fn cpu_load(prev: &mut Option<(u64, u64)>) -> Option<i32> {
     };
     *prev = Some((busy, total));
     let (db, dt) = (busy.saturating_sub(prev_busy) as f64, total.saturating_sub(prev_total) as f64);
-    (dt > 0.0).then(|| ((1.0 - db / dt) * 100.0).round().clamp(0.0, 100.0) as i32)
+    (dt > 0.0).then(|| (db / dt * 100.0).round().clamp(0.0, 100.0) as i32)
 }
 
 fn filetime(t: &FILETIME) -> u64 {
