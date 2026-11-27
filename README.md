@@ -357,6 +357,7 @@ The strip is a small layered window placed inside the taskbar, left of the notif
 | Fantech Raigor III / II | On the `1EA7:0066` / `0064` dongle (protocol from [t20-battery](https://github.com/tuttizpro218/t20-battery) and [TaskbarVitals](https://github.com/symNistaken/TaskbarVitals), GPL-3.0, verified on a Raigor III) |
 | Zaopin and ATK mice (CompX) | Zaopin 8K receiver `3554:F527` (confirmed on a ZPW MAX by [Joule](https://github.com/DillanCidral/Joule), MIT) and the ATK NK receiver `373B:10C9` (measured on an ATK A9 SE by [HaloBattery](https://github.com/HeyOkay/HaloBattery)); CompX report 8 |
 | Razer Kraken V3 Pro | Over its HyperSpeed dongle `1532:052C`, through the dongle's USB serial port (protocol from [razer-peripherals-protocol](https://github.com/immortalbob/razer-peripherals-protocol), observed on the headset, and [OmaKraken](https://github.com/Dankestrick/OmaKraken), MIT); not read while Razer Synapse runs, which owns that port; level (10 % steps) and charging confirmed by [Sk1vvy](https://github.com/Sk1vvy), #234 |
+| Rapoo VT9 PRO | Suitable for the default 1K receiver `24AE:185A`. It is used for monitoring only, does not transmit any data, and has been tested through a complete charging cycle. It may have resolved issue [#374](../../issues/374). by [zhixia11](https://github.com/zhixia11) |
 
 Device not shown? Use *Request support for a device...* in the right-click menu (see above). More brands from the original project can be added as one file each in `src/drivers/`; pull requests are welcome (the ROCCAT, FNATIC BOLT and HyperX Cloud Flight drivers came from them). Devices can be excluded with `HKCU\Software\WirelessBattery\IgnoreDevices` (`VID:PID` list, the same setting as the original).
 
@@ -481,7 +482,6 @@ Devices that were requested but cannot be supported for now, and why. Most of th
 | "Wireless Receiver" mouse (Telink) | `248A:8514` | No documented battery read; commands are not guessed | [#364](../../issues/364) |
 | SteelSeries Apex Pro TKL Wireless | `1038:1632` | No documented battery read for this keyboard; commands are not guessed | [#372](../../issues/372) |
 | fifine microphone | `3142:0006` | Shows Windows only media keys; no battery channel | [#373](../../issues/373) |
-| Rapoo VT9 PRO (older receiver) | `24AE:185A` | The VT9 PRO read is documented for its `1205` / `1221` receivers only; this id is listed as unverified | [#374](../../issues/374) |
 | Rapoo 2.4G keyboard | `24AE:2015` | No documented battery read; commands are not guessed | [#380](../../issues/380) |
 | "2.4G Wireless Receiver" mouse (Areson) | `25A7:FA11` | No documented battery read; commands are not guessed | [#381](../../issues/381) |
 | Crave Pro Wireless headset | `3299:2725` | No documented battery read; commands are not guessed | [#385](../../issues/385) |
