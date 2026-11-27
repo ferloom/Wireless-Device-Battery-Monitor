@@ -77,6 +77,10 @@ struct Cache {
     known: HashMap<isize, Entry>,
     /// First request for a taskbar not answered yet.
     asked: HashMap<isize, Instant>,
+    /// Notification-area icons seen on each taskbar. Windows 11's privacy indicators (microphone,
+    /// location, camera) come and go without moving `TrayNotifyWnd`; when that set changes, every
+    /// cached tray edge must be checked again.
+    tray: HashMap<isize, Vec<(i32, i32)>>,
 }
 
 static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
@@ -306,8 +310,9 @@ fn items(bar: HWND, bar_rect: RECT, notify: HWND, msg: u32, max_age: Duration) -
     if start {
         let notify = notify.0 as isize;
         std::thread::spawn(move || {
-            let mut labelled = probe_items(key).unwrap_or_default();
+            let (mut labelled, mut tray) = probe_items(key).unwrap_or_default();
             labelled.sort();
+            tray.sort();
             let items: Vec<(i32, i32)> = labelled.iter().map(|&(l, r, _)| (l, r)).collect();
             let changed = {
                 let mut g = LEFT.lock().unwrap_or_else(|e| e.into_inner());
@@ -316,11 +321,22 @@ fn items(bar: HWND, bar_rect: RECT, notify: HWND, msg: u32, max_age: Duration) -
                 m.retain(|_, e| e.at.elapsed() < Duration::from_secs(600));
                 old.is_none_or(|o| o.items != items || o.bar != r)
             };
+            // A microphone / location / camera icon can appear without any task button changing.
+            // Every cached tray edge is then out of date, including the other monitors'.
+            let tray_changed = {
+                let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                let c = g.get_or_insert_with(Cache::default);
+                let old = c.tray.insert(key, tray.clone());
+                old.is_none_or(|o| o != tray.clone())
+            };
+            if tray_changed {
+                taskbars_changed();
+            }
             if let Some(b) = LEFT_BUSY.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                 b.remove(&key);
             }
-            if changed {
-                crate::util::debug_log(|| format!("taskbar {key:X} items: {labelled:?}"));
+            if changed || tray_changed {
+                crate::util::debug_log(|| format!("taskbar {key:X} items: {labelled:?}, tray: {tray:?}"));
                 unsafe {
                     let _ = PostMessageW(Some(HWND(notify as *mut _)), msg, WPARAM(0), LPARAM(0));
                 }
@@ -351,16 +367,17 @@ pub fn left_chain_end(items: &[(i32, i32)], bar_left: i32, bar_h: i32) -> i32 {
 
 /// The taskbar's own items (buttons), as (left, right) in screen x: not the notification area,
 /// not containers spanning a large part of the taskbar, and not BatteryHub's own windows.
-fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
+fn probe_items(bar: isize) -> Option<(Vec<(i32, i32, String)>, Vec<(i32, i32)>)> {
     unsafe {
         let init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let found = (|| -> windows::core::Result<Vec<(i32, i32, String)>> {
+        let found = (|| -> windows::core::Result<(Vec<(i32, i32, String)>, Vec<(i32, i32)>)> {
             let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
             let root = uia.ElementFromHandle(HWND(bar as *mut _))?;
             let rb = root.CurrentBoundingRectangle()?;
             let width = rb.right - rb.left;
             let all = root.FindAll(TreeScope_Descendants, &uia.CreateTrueCondition()?)?;
             let mut out = Vec::new();
+            let mut tray = Vec::new();
             for i in 0..all.Length()? {
                 let e = all.GetElement(i)?;
                 let b = e.CurrentBoundingRectangle()?;
@@ -383,7 +400,14 @@ fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
                 if e.CurrentProcessId().is_ok_and(|p| p as u32 == std::process::id()) {
                     continue;
                 }
-                if id == TRAY_ID || class.starts_with("BatteryHub") || matches!(class.as_str(), "TrayNotifyWnd" | "ReBarWindow32" | "MSTaskSwWClass" | "MSTaskListWClass") {
+                // A system-tray icon is not a task button. Remember its place as well: privacy
+                // indicators appear and disappear without moving the tray window, and a cached tray
+                // edge from before the change would put the widget in the wrong place.
+                if id == TRAY_ID || id.starts_with("SystemTray") || class.starts_with("SystemTray") {
+                    tray.push((b.left, b.right));
+                    continue;
+                }
+                if class.starts_with("BatteryHub") || matches!(class.as_str(), "TrayNotifyWnd" | "ReBarWindow32" | "MSTaskSwWClass" | "MSTaskListWClass") {
                     continue;
                 }
                 // Class / automation id / name: what covered the widget, in the log (BH_DEBUG).
@@ -395,7 +419,7 @@ fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
                 };
                 out.push((b.left, b.right, label));
             }
-            Ok(out)
+            Ok((out, tray))
         })();
         if init {
             CoUninitialize();
