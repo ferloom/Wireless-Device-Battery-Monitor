@@ -46,7 +46,8 @@ const fn p(vid: u16, pid: u16, name: &'static str, group: &'static str, cable: b
     Product { vid, pid, name, group, cable }
 }
 
-const PRODUCTS: [Product; 23] = [
+const PRODUCTS: [Product; 24] = [
+    p(0x3554, 0xF5BC, "Dark Project ME5 Pro", "darkproject-me5", false),
     p(0x3554, 0xF508, "Pulsar mouse", "pulsar1k", false),
     p(0x3554, 0xF509, "Pulsar mouse", "pulsar4k", false),
     p(0x3554, 0xF507, "Pulsar mouse", "pulsar-cable", true),
@@ -114,6 +115,13 @@ pub fn parse_power(r: &[u8]) -> Option<(i32, bool, i32)> {
     (valid(r, CMD_POWER) && r[6] <= 100 && r[7] <= 1).then(|| (r[6] as i32, r[7] == 1, ((r[8] as i32) << 8) | r[9] as i32))
 }
 
+fn parse_reply<T>(cmd: u8, r: &[u8], parse: fn(&[u8]) -> Option<T>) -> Option<T> {
+    if r.len() >= LEN && r[..LEN] == request(cmd) {
+        return None;
+    }
+    parse(r)
+}
+
 fn query<T>(d: &HidDev, cmd: u8, parse: fn(&[u8]) -> Option<T>) -> Option<T> {
     d.flush();
     if !d.write(&request(cmd)) {
@@ -121,7 +129,7 @@ fn query<T>(d: &HidDev, cmd: u8, parse: fn(&[u8]) -> Option<T>) -> Option<T> {
     }
     let end = Deadline::in_ms(REPLY_MS);
     while !end.passed() {
-        if let Some(v) = d.read(end.left_ms()).and_then(|r| parse(&r)) {
+        if let Some(v) = d.read(end.left_ms()).and_then(|r| parse_reply(cmd, &r, parse)) {
             return Some(v);
         }
     }
@@ -173,7 +181,7 @@ fn add_or_merge(ctx: &mut PollContext, mut s: DeviceStatus, prod: &Product, vid:
 }
 
 fn battery_collection(vid: u16, c: &HidColl) -> bool {
-    if vid == 0x3710 {
+    if vid == 0x3710 || (vid == 0x3554 && c.pid == 0xF5BC) {
         c.page() == 0xFF02 && c.usage() == 0x0002 && c.iface == 1 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
     } else {
         c.page() >= 0xFF00 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
@@ -278,6 +286,56 @@ mod tests {
         assert_eq!(parse_power(&frame(&[0x08, 0x04, 0, 0, 0, 0x02, 0x65, 0x00])), None); // 101 %
         assert_eq!(parse_power(&frame(&[0x08, 0x03, 0, 0, 0, 0x02, 0x40, 0x00])), None); // other command
         assert_eq!(parse_power(&r[..10]), None);
+    }
+
+    #[test]
+    fn me5_8k_captured_replies() {
+        let status = [0x08, 0x03, 0, 0, 0, 0x01, 0x01, 0x51, 0x48, 0x4A, 0, 0, 0, 0, 0, 0, 0x65];
+        let power = [0x08, 0x04, 0, 0, 0, 0x02, 0x1E, 0, 0x0E, 0x88, 0, 0, 0, 0, 0, 0, 0x93];
+        let power_next = [0x08, 0x04, 0, 0, 0, 0x02, 0x1E, 0, 0x0E, 0x8D, 0, 0, 0, 0, 0, 0, 0x8E];
+        assert_eq!(parse_status(&status), Some(true));
+        let offline = [0x08, 0x03, 0, 0, 0, 0x01, 0, 0x51, 0x48, 0x4A, 0, 0, 0, 0, 0, 0, 0x66];
+        assert_eq!(parse_status(&offline), Some(false));
+        assert_eq!(parse_power(&offline), None);
+        assert_eq!(parse_power(&power), Some((30, false, 3720)));
+        assert_eq!(parse_power(&power_next), Some((30, false, 3725)));
+        let mut bad = power;
+        bad[16] ^= 1;
+        assert_eq!(parse_power(&bad), None);
+        assert_eq!(parse_power(&power[..16]), None);
+    }
+
+    #[test]
+    fn request_echo_is_not_a_battery_or_link_reply() {
+        assert_eq!(parse_reply(CMD_STATUS, &request(CMD_STATUS), parse_status), None);
+        assert_eq!(parse_reply(CMD_POWER, &request(CMD_POWER), parse_power), None);
+        assert_eq!(parse_power(&frame(&[0x08, 0x04, 0, 0, 0, 2, 0, 0, 0x0D, 0xAC])), Some((0, false, 3500)));
+        assert_eq!(parse_status(&frame(&[0x08, 0x03, 0, 0, 0, 1, 0])), Some(false));
+    }
+
+    #[test]
+    fn me5_8k_uses_only_its_confirmed_channel_and_identity() {
+        let prod = PRODUCTS.iter().find(|p| p.vid == 0x3554 && p.pid == 0xF5BC).unwrap();
+        assert_eq!(prod.name, "Dark Project ME5 Pro");
+        assert_eq!(key(prod), "compx:darkproject-me5");
+        assert!(!prod.cable);
+        assert!(!PRODUCTS.iter().any(|p| p.vid == 0x3554 && matches!(p.pid, 0xF5B9 | 0xFB2D)));
+        let coll = HidColl {
+            vid: prod.vid,
+            pid: prod.pid,
+            iface: 1,
+            usage_page: 0xFF02,
+            usage_id: 0x0002,
+            input_len: 17,
+            output_len: 17,
+            ..Default::default()
+        };
+        assert!(battery_collection(prod.vid, &coll));
+        assert!(!battery_collection(prod.vid, &HidColl { iface: 2, ..coll.clone() }));
+        assert!(!battery_collection(prod.vid, &HidColl { usage_page: 0xFF06, ..coll.clone() }));
+        assert!(!battery_collection(prod.vid, &HidColl { usage_id: 0, ..coll.clone() }));
+        assert!(!battery_collection(prod.vid, &HidColl { input_len: 49, ..coll.clone() }));
+        assert!(!battery_collection(prod.vid, &HidColl { output_len: 49, ..coll }));
     }
 
     #[test]
