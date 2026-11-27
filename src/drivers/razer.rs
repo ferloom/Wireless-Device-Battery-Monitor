@@ -78,6 +78,11 @@ fn clean_name(mut n: String) -> String {
 }
 
 fn kind(colls: &[HidColl], vid: u16, pid: u16, name: &str) -> DeviceKind {
+    // A known keyboard id is a keyboard whatever it calls itself: the DeathStalker V2 Pro reports
+    // "DSV2 Pro" and exposes a mouse collection next to the keyboard one (#795).
+    if keyboard_battery_tid(pid) != 0 {
+        return DeviceKind::Keyboard;
+    }
     let n = name.to_lowercase();
     if n.contains("keyboard") || n.contains("blackwidow") || n.contains("huntsman") || n.contains("ornata") || n.contains("deathstalker") {
         return DeviceKind::Keyboard;
@@ -139,5 +144,25 @@ pub fn poll(ctx: &mut PollContext) {
             }
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kind;
+    use crate::device::DeviceKind;
+    use crate::hid::HidColl;
+
+    #[test]
+    fn a_keyboard_id_is_a_keyboard_whatever_its_name() {
+        // DeathStalker V2 Pro: receiver (0290) and cable (0292) report "DSV2 Pro" and expose a
+        // mouse collection next to the keyboard one (#795); the id decides.
+        for pid in [0x0290, 0x0292] {
+            let mouse = HidColl { vid: 0x1532, pid, usage_page: 0x01, usage_id: 0x02, ..Default::default() };
+            assert_eq!(kind(&[mouse], 0x1532, pid, "DSV2 Pro"), DeviceKind::Keyboard);
+        }
+        // An id outside the table keeps the old order: the mouse collection decides.
+        let mouse = HidColl { vid: 0x1532, pid: 0x00A4, usage_page: 0x01, usage_id: 0x02, ..Default::default() };
+        assert_eq!(kind(&[mouse], 0x1532, 0x00A4, "Razer Mouse Dock Pro"), DeviceKind::Mouse);
     }
 }
