@@ -33,6 +33,7 @@ pub mod darmoshark_m3pro;
 pub mod drivercore;
 pub mod endgame_4k;
 pub mod evision;
+pub mod eweadn_x23;
 pub mod flydigi;
 pub mod fnatic;
 pub mod fractal;

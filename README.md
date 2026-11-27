@@ -357,6 +357,7 @@ The strip is a small layered window placed inside the taskbar, left of the notif
 | Fantech Raigor III / II | On the `1EA7:0066` / `0064` dongle (protocol from [t20-battery](https://github.com/tuttizpro218/t20-battery) and [TaskbarVitals](https://github.com/symNistaken/TaskbarVitals), GPL-3.0, verified on a Raigor III) |
 | Zaopin and ATK mice (CompX) | Zaopin 8K receiver `3554:F527` (confirmed on a ZPW MAX by [Joule](https://github.com/DillanCidral/Joule), MIT) and the ATK NK receiver `373B:10C9` (measured on an ATK A9 SE by [HaloBattery](https://github.com/HeyOkay/HaloBattery)); CompX report 8 |
 | Razer Kraken V3 Pro | Over its HyperSpeed dongle `1532:052C`, through the dongle's USB serial port (protocol from [razer-peripherals-protocol](https://github.com/immortalbob/razer-peripherals-protocol), observed on the headset, and [OmaKraken](https://github.com/Dankestrick/OmaKraken), MIT); not read while Razer Synapse runs, which owns that port; level (10 % steps) and charging confirmed by [Sk1vvy](https://github.com/Sk1vvy), #234 |
+| EWEADN X23 Pro | Over its 2.4 GHz receiver `04F3:026F` ("X23 Pro Receiver", passive read on `000A:0000` 32-byte input report, no charging state; protocol from [eweadn-battery-tray](https://github.com/17iii/eweadn-battery-tray), MIT, verified on hardware in [#629](../../issues/629)) |
 
 Device not shown? Use *Request support for a device...* in the right-click menu (see above). More brands from the original project can be added as one file each in `src/drivers/`; pull requests are welcome (the ROCCAT, FNATIC BOLT and HyperX Cloud Flight drivers came from them). Devices can be excluded with `HKCU\Software\WirelessBattery\IgnoreDevices` (`VID:PID` list, the same setting as the original).
 
@@ -535,7 +536,6 @@ Devices that were requested but cannot be supported for now, and why. Most of th
 | lunacy one | `C019:1234` | No documented battery protocol; commands are not guessed | [#542](../../issues/542) |
 | RAWM HS Receiver | `1915:232B` | The RAWM read is documented for `1915:2346` only; commands are not guessed | [#550](../../issues/550) |
 | Epomaker HE108 | `3151:5038` | No documented battery protocol; commands are not guessed | [#551](../../issues/551) |
-| X23 Pro Receiver | `04F3:026F` | No documented battery protocol; commands are not guessed | [#555](../../issues/555) |
 | "2.4G Wireless Receiver" | `3485:103A` | No documented battery protocol; commands are not guessed | [#564](../../issues/564) |
 | HyperX Cloud Flight for PS | `03F0:0C8C` | The Cloud Flight read is documented for its `0951` dongles only; commands are not guessed | [#565](../../issues/565) |
 | BenQ ZOWIE mouse | `04A5:8006` | The ZOWIE read is documented for the `800A` / `8008` receivers only; commands are not guessed | [#568](../../issues/568) |
