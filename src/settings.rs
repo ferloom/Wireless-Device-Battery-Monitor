@@ -437,8 +437,8 @@ pub fn with_new_first(saved: &[String], new: &[String]) -> Vec<String> {
 pub const FORGET_SECS: u64 = crate::history::KEEP_SECS;
 
 /// Per-device settings, by subkey (a value per device key).
-const DEVICE_SUBKEYS: [&str; 17] =
-    ["Order", "Names", "Hidden", "Thresholds", "Warn5", "RedIcon", "IconColor", "IconFile", "Hover", "CardOnClick", "CardDismiss", "CardChart", "CardTime", "BatteryOnly", "RiseCharging", "Glow", "Merged"];
+const DEVICE_SUBKEYS: [&str; 18] =
+    ["Order", "Names", "Hidden", "Thresholds", "Warn5", "RedIcon", "IconColor", "IconFile", "Hover", "CardOnClick", "CardDismiss", "CardChart", "CardTime", "BatteryOnly", "RiseCharging", "Glow", "Merged", "Separated"];
 
 /// Deletes every setting BatteryHub keeps for one device (name, order, warning levels, colours,
 /// hover, when it was last seen and what it was): "Delete device" in the dashboard.
@@ -503,6 +503,26 @@ pub fn is_merged(map: &HashMap<String, String>, key: &str) -> bool {
 /// Registry values to delete to separate `key`: itself and every connection joined into it.
 pub fn merged_members(map: &HashMap<String, String>, key: &str) -> Vec<String> {
     map.iter().filter(|(member, target)| *member == key || *target == key).map(|(member, _)| member.clone()).collect()
+}
+
+/// Invisible per-device mark left after a join is undone. It keeps "Separate" from being offered
+/// again on a device that is already apart; it is never shown in the UI.
+pub fn mark_separated(settings_key: &str, keys: &[String]) {
+    if let Some(k) = inst::create(HKCU, &sub(settings_key, "Separated")) {
+        for key in keys {
+            let _ = k.set_string(key, "1");
+        }
+    }
+}
+
+pub fn was_separated(settings_key: &str, key: &str) -> bool {
+    inst::open(HKCU, &sub(settings_key, "Separated"), false).and_then(|k| k.get(key)).as_deref() == Some("1")
+}
+
+pub fn clear_separated(settings_key: &str, key: &str) {
+    if let Some(k) = inst::open(HKCU, &sub(settings_key, "Separated"), true) {
+        let _ = k.delete_value(key);
+    }
 }
 
 /// Moves the settings of `from` under `to` (values already on `to` win), preserving their types.
@@ -773,7 +793,8 @@ pub fn append_device_menus(
             icons.set(sub, id(ITEM_SHOW) as u32, false, glyph::VIEW);
             // Two connections of one physical device read as one (#644).
             let merged = merged_targets(settings_key);
-            if devices.len() > 1 {
+            // A device already joined can only be separated, not joined again.
+            if devices.len() > 1 && !is_merged(&merged, &d.key) {
                 if let Ok(join) = CreatePopupMenu() {
                     for (j, other) in devices.iter().enumerate() {
                         if j == i {
@@ -789,7 +810,7 @@ pub fn append_device_menus(
                     icons.set(sub, n as u32, true, glyph::SYNC);
                 }
             }
-            if is_merged(&merged, &d.key) {
+            if is_merged(&merged, &d.key) && !was_separated(settings_key, &d.key) {
                 let _ = AppendMenuW(sub, MF_STRING, id(ITEM_UNMERGE), &hs(&tr("Separate the connections again")));
                 icons.set(sub, id(ITEM_UNMERGE) as u32, false, glyph::RESET);
             }
@@ -817,6 +838,7 @@ pub fn append_device_menus(
             // Separate from "On hover": the card can stay on the mouse *and* open on a click.
             let card_check = if card_on_click(settings_key, &d.key) { MF_CHECKED } else { MF_UNCHECKED };
             let _ = AppendMenuW(sub, MF_STRING | card_check, id(ITEM_CARD_ON_CLICK), &hs(&tr("Card on click")));
+            icons.set(sub, id(ITEM_CARD_ON_CLICK) as u32, false, glyph::VIEW);
             // Two ways for that clicked card to go away. "On another click" is the default.
             if let Ok(close) = CreatePopupMenu() {
                 let checked = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
@@ -871,10 +893,11 @@ pub fn append_device_menus(
 }
 
 /// Decodes a "Join with another connection" command into (device index, target device index).
+/// Target 0 is valid — rejecting it made joining the first device from any other menu a no-op.
 pub fn decode_merge_id(id: usize) -> Option<(usize, usize)> {
     let rel = id.checked_sub(MERGE_ID_BASE)?;
     let (dev, target) = (rel / MERGE_STRIDE, rel % MERGE_STRIDE);
-    (target > 0 && dev < 64 && target < 64).then_some((dev, target))
+    (rel > 0 && dev < 64 && target < 64).then_some((dev, target))
 }
 
 /// Decodes a menu id from `append_device_menus` into (device index, action).
@@ -976,6 +999,7 @@ mod tests {
     #[test]
     fn joined_connection_ids_and_keys() {
         assert_eq!(decode_merge_id(MERGE_ID_BASE + 1 * MERGE_STRIDE + 2), Some((1, 2)));
+        assert_eq!(decode_merge_id(MERGE_ID_BASE + 1 * MERGE_STRIDE), Some((1, 0))); // the first device is a valid target
         assert_eq!(decode_merge_id(MERGE_ID_BASE + 63 * MERGE_STRIDE + 63), Some((63, 63)));
         assert_eq!(decode_merge_id(MERGE_ID_BASE), None); // no target
         assert_eq!(decode_merge_id(MERGE_ID_BASE + 64 * MERGE_STRIDE + 1), None);

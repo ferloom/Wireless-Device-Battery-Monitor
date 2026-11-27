@@ -375,6 +375,30 @@ struct Tracked {
     reported: String,
 }
 
+/// Ring power states, in the order the bolt colour moves through them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RingPower {
+    Off,
+    Charging,
+    Full,
+}
+
+/// One ring animation: the state it came from, the state it is going to, and when it started.
+#[derive(Clone, Copy)]
+struct RingAnim {
+    at: Instant,
+    from: RingPower,
+    to: RingPower,
+}
+
+/// Blend two COLORREFs (stored as 0x00BBGGRR) channel by channel.
+fn mix_color(a: COLORREF, b: COLORREF, t: f32) -> COLORREF {
+    let (ar, ag, ab) = split(a);
+    let (br, bg, bb) = split(b);
+    let mix = |x: u8, y: u8| -> u8 { (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8 };
+    rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+}
+
 #[derive(Default)]
 struct App {
     main: HWND,
@@ -420,8 +444,8 @@ struct App {
     charge_t0: ChargeClock,
     /// "Ring style": each device as its icon inside a ring filled to its level.
     ring: bool,
-    /// Ring charging transitions: when power was plugged / unplugged and which way it went.
-    ring_charge: HashMap<String, (Instant, bool)>,
+    /// Ring power transitions: from which bolt colour to which, including 100% (blue) and unplug.
+    ring_charge: HashMap<String, RingAnim>,
     /// Show a small connection badge (dongle, Bluetooth, Wi-Fi, cable) next to each device.
     connection_icons: bool,
     /// Toggling the badges: when it started and whether they are appearing (else disappearing).
@@ -1570,9 +1594,12 @@ fn ring_bolt_mask(icon: &Mask, d: i32, thick: f32, gap: f32, open: f32) -> Mask 
     let (cx, cy, _, _) = ring_geometry(icon, d);
     let rm = (d as f32 / 2.0 - 1.0) - thick / 2.0;
     // Middle of the removed segment, then centre the bolt's ink there on x and y.
-    let gy = cy - rm * (gap * std::f32::consts::PI).cos() - (d as f32 * 0.07).round();
+    let gy = cy - rm * (gap * std::f32::consts::PI).cos() - (d as f32 * 0.07).round() - 1.0;
     let x0 = (cx - raw.w as f32 / 2.0).round() as i32;
-    let y0 = (gy - raw.h as f32 / 2.0).round().clamp(0.0, (d - raw.h) as f32) as i32;
+    // One pixel above the cell is allowed: the top of the bolt is its thinnest tip, so clipping
+    // that row is what actually lifts the visible bolt by 1 px at 100% DPI (where a plain 0 clamp
+    // kept it pinned to the top edge).
+    let y0 = (gy - raw.h as f32 / 2.0).round().clamp(-1.0, (d - raw.h) as f32) as i32;
     for yy in 0..raw.h {
         for xx in 0..raw.w {
             let (tx, ty) = (x0 + xx, y0 + yy);
@@ -1888,14 +1915,14 @@ impl App {
                 // top segment moves aside (with round ends), the unfilled remainder fades away and
                 // a bolt takes the gap; unplugging plays the same animation backwards.
                 let on_power = d.is_charging() || d.is_full();
-                let (open, fill, animating) = self.ring_charge_state(&d.key, on_power, d.percent, Instant::now());
+                let now = Instant::now();
+                let (open, fill, animating) = self.ring_charge_state(&d.key, on_power, d.percent, now);
+                let base_color = if low { red } else { own };
+                // Green while charging, blue at 100%, and a blue -> normal fade on unplug.
+                let ring_color = self.ring_color(&d.key, d, light, base_color, now, animating);
                 if !animating {
                     self.ring_charge.remove(&d.key);
                 }
-                // The ring and the bolt in its gap use the bolt's colour: green while charging,
-                // blue once the device reached 100% and is still on power.
-                let power_color = Self::ring_power_color(d, light);
-                let ring_color = if on_power || animating { power_color } else { bolt_color.unwrap_or(if low { red } else { own }) };
                 let dpx = px(28.0);
                 let thick = (2.5 * s).max(2.0);
                 let gap = RING_GAP * open;
@@ -2153,16 +2180,51 @@ impl App {
         ui::bolt_color(d, light).unwrap_or_else(|| ui::charging_color(light))
     }
 
+    fn ring_power(d: &DeviceStatus) -> RingPower {
+        if d.is_full() {
+            RingPower::Full
+        } else if d.is_charging() {
+            RingPower::Charging
+        } else {
+            RingPower::Off
+        }
+    }
+
+    fn ring_anim_color(state: RingPower, light: bool, base: COLORREF) -> COLORREF {
+        match state {
+            RingPower::Off => base,
+            RingPower::Charging => ui::charging_color(light),
+            RingPower::Full => ui::full_color(light),
+        }
+    }
+
+    /// Ring colour during a transition. From 100% on unplug it goes straight from blue to the
+    /// normal icon colour; charging green is only an endpoint when it actually was the start state.
+    fn ring_color(&self, key: &str, d: &DeviceStatus, light: bool, base: COLORREF, now: Instant, animating: bool) -> COLORREF {
+        let Some(a) = self.ring_charge.get(key).filter(|_| animating) else {
+            return if Self::ring_power(d) == RingPower::Off { base } else { Self::ring_power_color(d, light) };
+        };
+        let p = (now.saturating_duration_since(a.at).as_secs_f32() * 1000.0 / RING_CHARGE_MS).clamp(0.0, 1.0);
+        let eased = p * p * (3.0 - 2.0 * p);
+        mix_color(Self::ring_anim_color(a.from, light, base), Self::ring_anim_color(a.to, light, base), eased)
+    }
+
     /// `(open, fill, animating)` for a ring: `open` 0..1 moves the top segment aside and fades in
     /// the bolt. `fill` is always the reported level — the gap does not turn 95% into 100%.
     fn ring_charge_state(&self, key: &str, on_power: bool, percent: i32, now: Instant) -> (f32, f32, bool) {
         let actual = (percent.clamp(0, 100) as f32) / 100.0;
         match self.ring_charge.get(key) {
             None => (if on_power { 1.0 } else { 0.0 }, actual, false),
-            Some(&(at, plugging)) => {
-                let p = (now.saturating_duration_since(at).as_secs_f32() * 1000.0 / RING_CHARGE_MS).clamp(0.0, 1.0);
+            Some(a) => {
+                let p = (now.saturating_duration_since(a.at).as_secs_f32() * 1000.0 / RING_CHARGE_MS).clamp(0.0, 1.0);
                 let eased = p * p * (3.0 - 2.0 * p);
-                let open = if plugging { eased } else { 1.0 - eased };
+                // Only plugging / unplugging moves the arc. Charging -> full is a colour-only fade.
+                let open = match (a.from, a.to) {
+                    (RingPower::Off, RingPower::Off) => 0.0,
+                    (RingPower::Off, _) => eased,
+                    (_, RingPower::Off) => 1.0 - eased,
+                    _ => 1.0,
+                };
                 (open, actual, p < 1.0)
             }
         }
@@ -2170,12 +2232,12 @@ impl App {
 
     fn prune_ring_charge(&mut self) {
         let now = Instant::now();
-        self.ring_charge.retain(|_, (at, _)| now.saturating_duration_since(*at).as_secs_f32() * 1000.0 < RING_CHARGE_MS);
+        self.ring_charge.retain(|_, a| now.saturating_duration_since(a.at).as_secs_f32() * 1000.0 < RING_CHARGE_MS);
     }
 
     fn ring_charge_animating(&self) -> bool {
         let now = Instant::now();
-        self.ring_charge.values().any(|&(at, _)| now.saturating_duration_since(at).as_secs_f32() * 1000.0 < RING_CHARGE_MS)
+        self.ring_charge.values().any(|a| now.saturating_duration_since(a.at).as_secs_f32() * 1000.0 < RING_CHARGE_MS)
     }
 
     fn sync_ring_charge_timer(&self) {
@@ -4729,12 +4791,14 @@ impl App {
             }
             let reported = std::mem::take(&mut s.name);
             s.name = self.names.get(&s.key).cloned().unwrap_or_else(|| reported.clone());
-            // Ring style: a change of power state starts the one-second open / close animation.
+            // Ring style: a change of power state animates the bolt colour too — green -> blue at
+            // 100%, and blue -> the normal icon colour on unplug (never a detour back through green).
             if self.ring {
-                let was = self.devices.get(&s.key).is_some_and(|t| t.status.is_charging() || t.status.is_full());
-                let plugged = s.is_charging() || s.is_full();
-                if was != plugged {
-                    self.ring_charge.insert(s.key.clone(), (now, plugged));
+                let was = self.devices.get(&s.key).map(|t| Self::ring_power(&t.status)).unwrap_or(RingPower::Off);
+                let now_power = Self::ring_power(&s);
+                if was != now_power {
+                    let from = self.ring_charge.get(&s.key).map(|a| a.to).unwrap_or(was);
+                    self.ring_charge.insert(s.key.clone(), RingAnim { at: now, from, to: now_power });
                 }
             }
             self.check_critical(&s);
@@ -6489,7 +6553,12 @@ unsafe fn show_menu(from: Option<HWND>) {
                     if let Some((dev, target)) = settings::decode_merge_id(id)
                         && let (Some(a), Some(b)) = (devices.get(dev), devices.get(target))
                     {
-                        join_devices(a, b);
+                        // The menu hides Join on joined devices; a stale command must not rejoin
+                        // them either. Only Separate is offered until they are apart again.
+                        let merged = settings::merged_targets(SETTINGS_KEY);
+                        if !settings::is_merged(&merged, &a.key) && !settings::is_merged(&merged, &b.key) {
+                            join_devices(a, b);
+                        }
                     }
                 }
                 id => {
@@ -6731,16 +6800,32 @@ fn join_devices(from: &DeviceStatus, to: &DeviceStatus) {
     });
     settings::move_device_settings(SETTINGS_KEY, &from.key, &to.key);
     settings::set_merged(SETTINGS_KEY, &from.key, &to.key);
+    settings::clear_separated(SETTINGS_KEY, &from.key);
+    settings::clear_separated(SETTINGS_KEY, &to.key);
     reload_after_merge();
 }
 
-/// Undoes a join for future readings (#644). The combined history stays under the kept key.
-/// The menu entry is on the kept device, so clear every connection joined into it as well.
+/// Undoes a join for future readings (#644). The menu entry is on the kept device, so clear every
+/// connection joined into it. Both connections get an invisible "already separated" mark, and all
+/// their measurements are dropped: a chart spanning the joined and separated readings is nonsense.
 fn separate_device(key: &str) {
     let map = settings::merged_targets(SETTINGS_KEY);
-    for member in settings::merged_members(&map, key) {
-        settings::clear_merged(SETTINGS_KEY, &member);
+    let mut keys = settings::merged_members(&map, key);
+    if keys.is_empty() {
+        return; // the hidden mark already stopped a repeated separation
     }
+    if !keys.iter().any(|k| k == key) {
+        keys.push(key.to_string());
+    }
+    for member in &keys {
+        settings::clear_merged(SETTINGS_KEY, member);
+    }
+    settings::mark_separated(SETTINGS_KEY, &keys);
+    with_app(|a| {
+        for k in &keys {
+            a.reset_history(k);
+        }
+    });
     reload_after_merge();
 }
 
@@ -7583,6 +7668,35 @@ mod tests {
     }
 
     #[test]
+    fn ring_colour_animates_charging_to_full_and_full_straight_to_normal() {
+        let light = false;
+        let base = rgb(255, 255, 255);
+        let t0 = Instant::now();
+        let half = t0 + std::time::Duration::from_millis(500);
+        let mut app = App::default();
+        let d = DeviceStatus { connected: true, percent: 100, charging: false, ..Default::default() };
+
+        // Unplug from 100%: blue -> white, with no green stop on the way.
+        app.ring_charge.insert("k".into(), RingAnim { at: t0, from: RingPower::Full, to: RingPower::Off });
+        assert_eq!(app.ring_color("k", &d, light, base, t0, true), ui::full_color(light));
+        let mid = app.ring_color("k", &d, light, base, half, true);
+        let (r, _, b) = split(mid);
+        assert!(b > 200 && r > 100, "expected a blue-to-white blend, got {mid:?}");
+        assert_ne!(mid, ui::charging_color(light));
+        let (open, _, animating) = app.ring_charge_state("k", false, 100, half);
+        assert!(animating && open > 0.0 && open < 1.0);
+
+        // Reaching 100% while still on power only fades green -> blue; the arc stays open.
+        app.ring_charge.insert("k".into(), RingAnim { at: t0, from: RingPower::Charging, to: RingPower::Full });
+        let (open, _, animating) = app.ring_charge_state("k", true, 100, half);
+        assert!(animating);
+        assert_eq!(open, 1.0);
+        let mid = app.ring_color("k", &d, light, base, half, true);
+        let (_, g, b) = split(mid);
+        assert!(g > 150 && b > 150);
+    }
+
+    #[test]
     fn vertical_taskbar_column() {
         // Two devices (icon, level, bolt) and one (icon, level) in a 48 px wide column.
         let pieces = [(Some(0), 16, 16), (Some(0), 26, 14), (Some(0), 8, 11), (Some(1), 16, 16), (Some(1), 30, 14)];
@@ -7656,6 +7770,7 @@ mod tests {
         }
         assert!(x1 >= x0 && y1 >= y0);
         assert!(((x0 + x1 + 1) - 28).abs() <= 1); // centred on the ring's vertical axis
+        assert!(y1 <= 6); // lifted 1 px into the top gap; the thinnest tip is clipped
         assert!(y1 < 10); // up in the top gap, not over the device icon in the middle
         assert_eq!(open.a[2 * 28 + 14], 0); // the top arc is gone
         assert!(open.a[14 * 28 + 25] > 128); // 95% still fills the rest of the ring
