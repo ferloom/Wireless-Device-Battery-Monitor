@@ -473,9 +473,13 @@ struct App {
     /// Since when the mouse is on neither the strip nor the card: the card closes shortly after,
     /// so the mouse can move from the strip onto it.
     card_away: Option<Instant>,
-    /// A card opened by a click: (device, strip). Another click, the menu, or the mouse leaving
-    /// both the strip and the card closes it (#439).
+    /// A card opened by a click: (device, strip). Another click or the menu closes it; the mouse
+    /// leaving both the strip and the card closes it only in the "Away" mode (#439).
     card_pinned: Option<(usize, HWND)>,
+    /// Which of the two ways above the pinned card uses (the default is "click elsewhere").
+    card_dismiss: settings::CardDismiss,
+    /// Mouse hook while a "click elsewhere" card is open.
+    click_hook: Option<HHOOK>,
     /// The left button moved far enough to be a drag, not a click.
     drag_moved: bool,
     /// Fonts of the strip and the card for the current DPI scale.
@@ -1452,6 +1456,12 @@ fn hover_card_mode(mode: settings::HoverMode) -> settings::HoverMode {
 /// the device must not open anything.
 fn hover_shows_popup(mode: settings::HoverMode, card_click: bool) -> bool {
     !card_click && hover_card_mode(mode) != settings::HoverMode::Off
+}
+
+/// A card opened by hover always closes when the mouse leaves. A clicked card does too, unless its
+/// setting asks for the Control Center behaviour (it then waits for a click elsewhere).
+fn closes_when_away(pinned: bool, mode: settings::CardDismiss) -> bool {
+    !pinned || mode == settings::CardDismiss::Away
 }
 
 /// Map a battery level onto the part of the circle that is still visible after the top `gap` is
@@ -4072,17 +4082,67 @@ impl App {
         }
     }
 
+    fn point_in_window(hwnd: HWND, pt: POINT) -> bool {
+        if hwnd.0.is_null() {
+            return false;
+        }
+        unsafe {
+            let mut rc = RECT::default();
+            IsWindowVisible(hwnd).as_bool() && GetWindowRect(hwnd, &mut rc).is_ok() && PtInRect(&rc, pt).as_bool()
+        }
+    }
+
+    /// A low-level hook is only needed while a clicked card is waiting for an outside click. It is
+    /// installed on this thread, which already has the message loop the hook call needs.
+    fn watch_outside_click(&mut self) {
+        if self.click_hook.is_some() {
+            return;
+        }
+        unsafe {
+            if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(click_hook_proc), None, 0) {
+                self.click_hook = Some(hook);
+            }
+        }
+    }
+
+    fn stop_watching_clicks(&mut self) {
+        if let Some(hook) = self.click_hook.take() {
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
+        }
+    }
+
+    /// A click outside the card (in another program, on the desktop, on another taskbar button)
+    /// closes it, like Windows 11's Control Center. Clicks on the card (chart scrubbing, its menu)
+    /// and on our strips (where click_device handles the toggle) are left alone.
+    fn outside_click(&mut self, pt: POINT) {
+        if self.card_pinned.is_none() || self.card_dismiss != settings::CardDismiss::OutsideClick {
+            return;
+        }
+        let mut strips = std::iter::once(self.strip)
+            .chain(self.mirrors.iter().map(|m| m.1))
+            .chain(self.parked.iter().map(|m| m.1));
+        if Self::point_in_window(self.card, pt) || strips.any(|s| Self::point_in_window(s, pt)) {
+            return;
+        }
+        dbg_log("click outside the card");
+        self.hide_tip();
+    }
+
     /// The mouse left the strip. An open card stays while the mouse moves onto it (the gap
     /// between the two is crossed in a moment); TIMER_AWAY then watches where it is.
     fn leave_strip(&mut self) {
         self.tracking = false;
-        // The mouse is off the strip: drop the highlight. A card opened by click closes by the
-        // same away timer as a hover card - it only stays while the mouse is on the card itself.
+        // The mouse is off the strip: drop the highlight. A hover card (and a clicked card in the
+        // "mouse leaves" mode) gets the away timer; the default clicked card waits for a click.
         self.set_hovered(HWND::default());
         if !self.card.0.is_null() && self.card_anim.visible && self.card_anim.showing {
-            self.card_away = Some(Instant::now());
-            unsafe {
-                SetTimer(Some(self.main), TIMER_AWAY, 50, None);
+            if closes_when_away(self.card_pinned.is_some(), self.card_dismiss) {
+                self.card_away = Some(Instant::now());
+                unsafe {
+                    SetTimer(Some(self.main), TIMER_AWAY, 50, None);
+                }
             }
         } else {
             self.hide_tip();
@@ -4093,6 +4153,10 @@ impl App {
     /// TIMER_AWAY: keeps the card while the mouse is on it, and closes it once the mouse has been
     /// on neither the card nor the strip for a moment.
     fn away_step(&mut self) {
+        // A clicked card in the default mode is not bound to the mouse at all.
+        if !closes_when_away(self.card_pinned.is_some(), self.card_dismiss) {
+            return;
+        }
         let mut pt = POINT::default();
         let under = unsafe { GetCursorPos(&mut pt).is_ok().then(|| WindowFromPoint(pt)) };
         if under.is_some_and(|w| w == self.card) && self.card_anim.showing {
@@ -4411,6 +4475,10 @@ impl App {
         let on = settings::card_on_click(SETTINGS_KEY, &key);
         dbg_log(&format!("click: {key} card_on_click={on}"));
         if !on {
+            // Clicking a device that does not use a click card is still an interaction elsewhere.
+            if self.card_pinned.is_some() {
+                self.hide_tip();
+            }
             return;
         }
         if self.card_pinned == Some((i, strip)) {
@@ -4420,6 +4488,12 @@ impl App {
         self.tooltip_off();
         self.show_card(i, strip, from, to);
         self.card_pinned = Some((i, strip));
+        self.card_dismiss = settings::card_dismiss(SETTINGS_KEY, &key);
+        if self.card_dismiss == settings::CardDismiss::OutsideClick {
+            self.watch_outside_click();
+        } else {
+            self.stop_watching_clicks();
+        }
         // The click card is independent of hover: no highlighted strip under the pinned card.
         self.set_hovered(HWND::default());
     }
@@ -4467,6 +4541,7 @@ impl App {
         self.card_pinned = None;
         self.card_away = None;
         self.card_scrub = None;
+        self.stop_watching_clicks();
         unsafe {
             let _ = KillTimer(Some(self.main), TIMER_AWAY);
         }
@@ -6511,6 +6586,11 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
             dbg_log(&format!("menu: {} card_on_click={on}", d.key));
             with_app(|a| a.hide_tip());
         }
+        DeviceAction::CardDismiss(mode) => {
+            settings::set_card_dismiss(SETTINGS_KEY, &d.key, mode);
+            dbg_log(&format!("menu: {} card_dismiss={mode:?}", d.key));
+            with_app(|a| a.hide_tip());
+        }
         DeviceAction::ToggleCardChart => {
             settings::set_card_chart(SETTINGS_KEY, &d.key, !settings::card_chart(SETTINGS_KEY, &d.key));
             with_app(|a| a.card_cache.clear());
@@ -6958,6 +7038,20 @@ extern "system" fn card_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
+    }
+}
+
+/// WH_MOUSE_LL runs on the thread that installed it, from its message loop, so it can safely use
+/// `with_app`. It is installed only while a card is waiting for an outside click.
+extern "system" fn click_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if code == HC_ACTION as i32 && (wp.0 as u32 == WM_LBUTTONDOWN || wp.0 as u32 == WM_RBUTTONDOWN) {
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_ok() {
+                with_app(|a| a.outside_click(pt));
+            }
+        }
+        CallNextHookEx(None, code, wp, lp)
     }
 }
 
@@ -7438,6 +7532,7 @@ fn main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        with_app(|a| a.stop_watching_clicks());
     }
 }
 
@@ -7450,6 +7545,14 @@ mod tests {
         assert_eq!(hover_card_mode(settings::HoverMode::Click), settings::HoverMode::Card);
         assert_eq!(hover_card_mode(settings::HoverMode::Tip), settings::HoverMode::Tip);
         assert_eq!(hover_card_mode(settings::HoverMode::Off), settings::HoverMode::Off);
+    }
+
+    #[test]
+    fn clicked_card_waits_for_a_click_by_default() {
+        use settings::CardDismiss::{Away, OutsideClick};
+        assert!(closes_when_away(false, OutsideClick)); // a hover card always follows the mouse
+        assert!(closes_when_away(true, Away));
+        assert!(!closes_when_away(true, OutsideClick));
     }
 
     #[test]

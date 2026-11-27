@@ -235,9 +235,8 @@ pub fn room(bar: HWND, bar_rect: RECT, x0: i32, x1: i32, notify: HWND, msg: u32,
             return Some(true);
         }
     }
-    if shown {
-        crate::util::debug_log(|| format!("room {x0}..{x1}: no room, covers {blockers:?}"));
-    } else {
+    crate::util::debug_log(|| format!("room {x0}..{x1}: no room (shown={shown}), covers {blockers:?}"));
+    if !shown {
         // Hidden for lack of room: checked again every few seconds (not only after `max_age`), so
         // something that covered the place only for a moment doesn't hide the widget for a minute.
         let key = bar.0 as isize;
@@ -342,6 +341,11 @@ fn probe_items(bar: isize) -> Option<Vec<(i32, i32, String)>> {
                 let e = all.GetElement(i)?;
                 let b = e.CurrentBoundingRectangle()?;
                 if b.right <= b.left || b.bottom <= b.top || (b.right - b.left) * 3 > width {
+                    continue;
+                }
+                // A collapsed or clipped item still reports a rectangle. It is not on the
+                // taskbar, so it must not make us think there is no room for the widget.
+                if e.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false) {
                     continue;
                 }
                 let id = e.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();

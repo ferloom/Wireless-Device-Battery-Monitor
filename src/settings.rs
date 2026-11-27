@@ -176,6 +176,40 @@ pub fn set_card_on_click(settings_key: &str, device_key: &str, on: bool) -> bool
     set_dword(settings_key, "CardOnClick", device_key, on as u32)
 }
 
+/// What closes a card opened with "Card on click". The second choice is the default: it behaves
+/// like Windows 11's Control Center, which stays up while you use its own controls and goes away
+/// when you click something else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CardDismiss {
+    /// The old behaviour: the card goes away once the mouse leaves it and the strip.
+    Away,
+    /// The card stays until a click outside it (default).
+    #[default]
+    OutsideClick,
+}
+
+fn dismiss_mode(v: Option<u32>) -> CardDismiss {
+    match v {
+        Some(0) => CardDismiss::Away,
+        _ => CardDismiss::OutsideClick,
+    }
+}
+
+fn dismiss_value(mode: CardDismiss) -> u32 {
+    match mode {
+        CardDismiss::Away => 0,
+        CardDismiss::OutsideClick => 1,
+    }
+}
+
+pub fn card_dismiss(settings_key: &str, device_key: &str) -> CardDismiss {
+    dismiss_mode(dword(settings_key, "CardDismiss", device_key))
+}
+
+pub fn set_card_dismiss(settings_key: &str, device_key: &str, mode: CardDismiss) -> bool {
+    set_dword(settings_key, "CardDismiss", device_key, dismiss_value(mode))
+}
+
 /// The card shows the battery chart (default on).
 pub fn card_chart(settings_key: &str, device_key: &str) -> bool {
     dword(settings_key, "CardChart", device_key) != Some(0)
@@ -403,8 +437,8 @@ pub fn with_new_first(saved: &[String], new: &[String]) -> Vec<String> {
 pub const FORGET_SECS: u64 = crate::history::KEEP_SECS;
 
 /// Per-device settings, by subkey (a value per device key).
-const DEVICE_SUBKEYS: [&str; 16] =
-    ["Order", "Names", "Hidden", "Thresholds", "Warn5", "RedIcon", "IconColor", "IconFile", "Hover", "CardOnClick", "CardChart", "CardTime", "BatteryOnly", "RiseCharging", "Glow", "Merged"];
+const DEVICE_SUBKEYS: [&str; 17] =
+    ["Order", "Names", "Hidden", "Thresholds", "Warn5", "RedIcon", "IconColor", "IconFile", "Hover", "CardOnClick", "CardDismiss", "CardChart", "CardTime", "BatteryOnly", "RiseCharging", "Glow", "Merged"];
 
 /// Deletes every setting BatteryHub keeps for one device (name, order, warning levels, colours,
 /// hover, when it was last seen and what it was): "Delete device" in the dashboard.
@@ -576,6 +610,8 @@ const ITEM_HOVER_CARD: usize = 32;
 const ITEM_HOVER_TIP: usize = 33;
 const ITEM_HOVER_OFF: usize = 34;
 const ITEM_CARD_ON_CLICK: usize = 40;
+const ITEM_CARD_DISMISS_AWAY: usize = 44;
+const ITEM_CARD_DISMISS_CLICK: usize = 45;
 const ITEM_UNMERGE: usize = 41;
 const ITEM_CUSTOM_ICON: usize = 42;
 const ITEM_RESET_ICON: usize = 43;
@@ -587,6 +623,7 @@ const ITEM_GLOW: usize = 39;
 const _: () = assert!(ITEM_COLOR_PRESET + PRESETS.len() <= ITEM_HOVER_CARD && ITEM_BATTERY_ONLY < STRIDE);
 const _: () = assert!(ITEM_THRESHOLD + THRESHOLDS.len() <= ITEM_MOVE_BACK && ITEM_RESET_HISTORY < STRIDE);
 const _: () = assert!(ITEM_RESET_ICON < STRIDE);
+const _: () = assert!(ITEM_CARD_DISMISS_CLICK < STRIDE);
 
 /// What a device menu item asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -604,6 +641,8 @@ pub enum DeviceAction {
     Hover(HoverMode),
     /// Open and pin the card on a left click, regardless of the hover setting (#439).
     ToggleCardOnClick,
+    /// Pick what closes a card opened by a click.
+    CardDismiss(CardDismiss),
     ToggleCardChart,
     ToggleCardTime,
     ToggleBatteryOnly,
@@ -765,8 +804,19 @@ pub fn append_device_menus(
                 icons.set(sub, n as u32, true, glyph::INFO);
             }
             // Separate from "On hover": the card can stay on the mouse *and* open on a click.
-            let check = if card_on_click(settings_key, &d.key) { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(sub, MF_STRING | check, id(ITEM_CARD_ON_CLICK), &hs(&tr("Card on click")));
+            let card_check = if card_on_click(settings_key, &d.key) { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(sub, MF_STRING | card_check, id(ITEM_CARD_ON_CLICK), &hs(&tr("Card on click")));
+            // Two ways for that clicked card to go away. "On another click" is the default.
+            if let Ok(close) = CreatePopupMenu() {
+                let checked = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+                let mode = card_dismiss(settings_key, &d.key);
+                let _ = AppendMenuW(close, MF_STRING | checked(mode == CardDismiss::Away), id(ITEM_CARD_DISMISS_AWAY), &hs(&tr("When the mouse leaves the card")));
+                let _ = AppendMenuW(close, MF_STRING | checked(mode == CardDismiss::OutsideClick), id(ITEM_CARD_DISMISS_CLICK), &hs(&tr("When I click elsewhere (like Control Center)")));
+                let n = windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(Some(sub));
+                let enabled = if card_on_click(settings_key, &d.key) { MF_ENABLED } else { MF_GRAYED };
+                let _ = AppendMenuW(sub, MF_STRING | MF_POPUP | enabled, close.0 as usize, &hs(&tr("Close the card")));
+                icons.set(sub, n as u32, true, glyph::SETTINGS);
+            }
             // No icon here on purpose: ModernMenu draws a check mark for checked items and the
             // item's glyph for unchecked ones. A CHECK glyph would show a tick in both states.
             let check = if only { MF_CHECKED } else { MF_UNCHECKED };
@@ -840,6 +890,8 @@ pub fn decode_menu_id(id: usize) -> Option<(usize, DeviceAction)> {
         ITEM_HOVER_TIP => DeviceAction::Hover(HoverMode::Tip),
         ITEM_HOVER_OFF => DeviceAction::Hover(HoverMode::Off),
         ITEM_CARD_ON_CLICK => DeviceAction::ToggleCardOnClick,
+        ITEM_CARD_DISMISS_AWAY => DeviceAction::CardDismiss(CardDismiss::Away),
+        ITEM_CARD_DISMISS_CLICK => DeviceAction::CardDismiss(CardDismiss::OutsideClick),
         ITEM_CARD_CHART => DeviceAction::ToggleCardChart,
         ITEM_CARD_TIME => DeviceAction::ToggleCardTime,
         ITEM_BATTERY_ONLY => DeviceAction::ToggleBatteryOnly,
@@ -876,6 +928,18 @@ mod tests {
     }
 
     #[test]
+    fn card_dismiss_defaults_to_clicking_elsewhere() {
+        // An unset value (and any old value other than 0) keeps the Control Center behaviour.
+        assert_eq!(dismiss_mode(None), CardDismiss::OutsideClick);
+        assert_eq!(dismiss_mode(Some(7)), CardDismiss::OutsideClick);
+        assert_eq!(dismiss_mode(Some(1)), CardDismiss::OutsideClick);
+        assert_eq!(dismiss_mode(Some(0)), CardDismiss::Away);
+        assert_eq!(dismiss_value(CardDismiss::OutsideClick), 1);
+        assert_eq!(dismiss_value(CardDismiss::Away), 0);
+        assert_eq!(CardDismiss::default(), CardDismiss::OutsideClick);
+    }
+
+    #[test]
     fn menu_ids_round_trip() {
         for dev in 0..5 {
             for (j, t) in THRESHOLDS.iter().enumerate() {
@@ -888,6 +952,8 @@ mod tests {
         assert_eq!(decode_menu_id(3), None);
         assert_eq!(decode_menu_id(MENU_BASE + 2 * STRIDE + ITEM_HOVER_TIP), Some((2, DeviceAction::Hover(HoverMode::Tip))));
         assert_eq!(decode_menu_id(MENU_BASE + 2 * STRIDE + ITEM_CARD_ON_CLICK), Some((2, DeviceAction::ToggleCardOnClick)));
+        assert_eq!(decode_menu_id(MENU_BASE + ITEM_CARD_DISMISS_AWAY), Some((0, DeviceAction::CardDismiss(CardDismiss::Away))));
+        assert_eq!(decode_menu_id(MENU_BASE + 2 * STRIDE + ITEM_CARD_DISMISS_CLICK), Some((2, DeviceAction::CardDismiss(CardDismiss::OutsideClick))));
         assert_eq!(decode_menu_id(MENU_BASE + STRIDE + ITEM_BATTERY_ONLY), Some((1, DeviceAction::ToggleBatteryOnly)));
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_RED_ICON), Some((0, DeviceAction::ToggleRedIcon)));
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_THRESHOLD + THRESHOLDS.len()), None);
