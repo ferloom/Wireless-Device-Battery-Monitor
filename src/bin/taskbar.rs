@@ -6735,8 +6735,12 @@ fn join_devices(from: &DeviceStatus, to: &DeviceStatus) {
 }
 
 /// Undoes a join for future readings (#644). The combined history stays under the kept key.
+/// The menu entry is on the kept device, so clear every connection joined into it as well.
 fn separate_device(key: &str) {
-    settings::clear_merged(SETTINGS_KEY, key);
+    let map = settings::merged_targets(SETTINGS_KEY);
+    for member in settings::merged_members(&map, key) {
+        settings::clear_merged(SETTINGS_KEY, &member);
+    }
     reload_after_merge();
 }
 

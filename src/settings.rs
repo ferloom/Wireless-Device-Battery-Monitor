@@ -494,6 +494,17 @@ pub fn resolve_merged(map: &HashMap<String, String>, key: &str) -> String {
     cur
 }
 
+/// Whether `key` takes part in a join: it was joined into another connection, or one was joined
+/// into it. The kept device is the one left on the strip, so it needs the "Separate" menu entry.
+pub fn is_merged(map: &HashMap<String, String>, key: &str) -> bool {
+    map.contains_key(key) || map.values().any(|t| t == key)
+}
+
+/// Registry values to delete to separate `key`: itself and every connection joined into it.
+pub fn merged_members(map: &HashMap<String, String>, key: &str) -> Vec<String> {
+    map.iter().filter(|(member, target)| *member == key || *target == key).map(|(member, _)| member.clone()).collect()
+}
+
 /// Moves the settings of `from` under `to` (values already on `to` win), preserving their types.
 pub fn move_device_settings(settings_key: &str, from: &str, to: &str) {
     for name in DEVICE_SUBKEYS.iter().chain(["Seen", "Known"].iter()) {
@@ -778,7 +789,7 @@ pub fn append_device_menus(
                     icons.set(sub, n as u32, true, glyph::SYNC);
                 }
             }
-            if merged.contains_key(&d.key) {
+            if is_merged(&merged, &d.key) {
                 let _ = AppendMenuW(sub, MF_STRING, id(ITEM_UNMERGE), &hs(&tr("Separate the connections again")));
                 icons.set(sub, id(ITEM_UNMERGE) as u32, false, glyph::RESET);
             }
@@ -978,6 +989,16 @@ mod tests {
         assert_eq!(resolve_merged(&map, "a"), "c");
         assert_eq!(resolve_merged(&map, "c"), "c");
         assert_eq!(resolve_merged(&map, "x"), "x"); // a cycle does not loop forever
+    }
+
+    #[test]
+    fn separate_is_offered_on_the_device_that_stayed() {
+        let map = HashMap::from([("bt".to_string(), "24g".to_string())]);
+        assert!(is_merged(&map, "bt")); // the joined connection, if still listed
+        assert!(is_merged(&map, "24g")); // the kept device shown on the strip
+        assert!(!is_merged(&map, "other"));
+        assert_eq!(merged_members(&map, "24g"), vec!["bt"]);
+        assert_eq!(merged_members(&map, "bt"), vec!["bt"]);
     }
 
     #[test]
