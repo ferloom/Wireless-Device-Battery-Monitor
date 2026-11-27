@@ -16,6 +16,11 @@
 //! the existing query fails or gets no valid reply.
 //! Only this read is sent; the configuration-write command and the Bluetooth OTA service are never
 //! touched. A level of 0 from the receiver means the mouse is off or out of range.
+//!
+//! Note: The Smailwolf RS6 (FYA6-3311 firmware V4.0.3) reports a hardcoded 100% battery with
+//! charge_flag=0 regardless of actual charge state, both online and offline. The official app
+//! hides the battery UI for this reason. We check the online status (cmd 0xED) before reading
+//! battery to avoid reporting stale data when the mouse is sleeping (online=1).
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
 use crate::hid::{HidColl, HidDev};
 use crate::util::{Deadline, hex4};
@@ -30,6 +35,7 @@ const DEVICES: [(u16, u16, bool, &str); 3] = [
     (0x391D, 0x1A03, false, "VGN Dragonfly 3 Pro"),
 ];
 const CMD_BATTERY: u8 = 0x30;
+const CMD_ONLINE: u8 = 0xED;
 const WAIT_MS: u64 = 700;
 
 /// The output report, report ID 0 first.
@@ -45,6 +51,21 @@ fn freq_request() -> [u8; 64] {
     let mut r = [0u8; 64];
     r[..8].copy_from_slice(&[0xF0, CMD_BATTERY, 0xA5, 0x0B, 0x2E, 0x01, 0x01, 0x01]);
     r
+}
+
+fn online_request() -> [u8; 64] {
+    let mut r = [0u8; 64];
+    r[..3].copy_from_slice(&[0xF0, CMD_ONLINE, 0x01]);
+    r
+}
+
+fn decode_online(r: &[u8]) -> Option<u8> {
+    // Response: F0 ED 01 XX ... where XX = 2 (online/awake), 1 (offline/sleeping), 0 (wired)
+    if r.len() >= 4 && r[0] == 0xF0 && r[1] == CMD_ONLINE && r[2] == 0x01 {
+        Some(r[3])
+    } else {
+        None
+    }
 }
 
 /// Battery reply (64 bytes, no report ID): Some((level, on USB power)).
@@ -93,6 +114,25 @@ fn read(c: &HidColl, receiver: bool) -> Option<(i32, bool)> {
     let d = HidDev::open(c)?;
     d.flush();
     let f0_eligible = uses_freq_query(c, receiver);
+    
+    // For receiver, check online status first (cmd 0xED) to avoid stale battery when mouse is sleeping
+    if receiver && f0_eligible {
+        if d.write(&online_request()) {
+                let end = Deadline::in_ms(WAIT_MS);
+            while !end.passed() {
+                if let Some(r) = d.read(end.left_ms()) {
+                    if let Some(online) = decode_online(&r) {
+                        // online=2 means mouse is awake/online; 1 = sleeping/offline; 0 = wired
+                        if online != 2 {
+                            return None; // mouse is sleeping, don't report stale battery
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
     let legacy_request_sent = d.write(&request());
     let mut request_sent = legacy_request_sent;
     let mut freq_attempted = false;
