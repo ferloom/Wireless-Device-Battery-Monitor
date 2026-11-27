@@ -481,6 +481,25 @@ pub fn clear_merged(settings_key: &str, member: &str) -> bool {
     })
 }
 
+/// The AJ139 cable was once joined to the receiver by hand. The driver now emits them as one
+/// device, so a left-over value only adds a phantom "Separate" entry (and can mix old histories).
+fn obsolete_merge(member: &str, target: &str) -> bool {
+    member == "ajazz139:a8a4:2255" && target == "ajazz139:a8a5:2255"
+}
+
+/// Drops joins that the driver has made unnecessary. Called on every settings refresh; a user who
+/// deliberately joins two other connections is never touched.
+pub fn forget_obsolete_merges(settings_key: &str) {
+    let Some(k) = inst::open(HKCU, &sub(settings_key, "Merged"), true) else {
+        return;
+    };
+    for (name, ty, data) in k.values() {
+        if ty == 1 && obsolete_merge(&name, data.trim()) {
+            let _ = k.delete_value(&name);
+        }
+    }
+}
+
 /// The key under which readings of `key` belong. Chains and cycles are resolved to one root.
 pub fn resolve_merged(map: &HashMap<String, String>, key: &str) -> String {
     let mut cur = key.to_string();
@@ -971,6 +990,14 @@ mod tests {
         assert_eq!(dismiss_value(CardDismiss::OutsideClick), 1);
         assert_eq!(dismiss_value(CardDismiss::Away), 0);
         assert_eq!(CardDismiss::default(), CardDismiss::OutsideClick);
+    }
+
+    #[test]
+    fn only_the_old_ajazz_join_is_obsolete() {
+        assert!(obsolete_merge("ajazz139:a8a4:2255", "ajazz139:a8a5:2255"));
+        assert!(!obsolete_merge("ajazz139:a8a5:2255", "ajazz139:a8a4:2255"));
+        assert!(!obsolete_merge("ajazz139:a8a4:2255", "ajazz139:a8a4:2255"));
+        assert!(!obsolete_merge("other:1", "other:2"));
     }
 
     #[test]

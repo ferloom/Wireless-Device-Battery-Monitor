@@ -5327,6 +5327,7 @@ impl App {
 impl App {
     /// Re-reads the taskbar theme and TaskbarOffset (start-up and WM_SETTINGCHANGE only).
     fn refresh_settings(&mut self) {
+        settings::forget_obsolete_merges(SETTINGS_KEY);
         self.light = ui::taskbar_is_light();
         self.offset = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffset").unwrap_or(0);
         let side = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetLeft").unwrap_or(0);

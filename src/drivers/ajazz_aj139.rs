@@ -16,6 +16,9 @@
 //! the existing query fails or gets no valid reply.
 //! Only this read is sent; the configuration-write command and the Bluetooth OTA service are never
 //! touched. A level of 0 from the receiver means the mouse is off or out of range.
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
 use crate::hid::{HidColl, HidDev};
 use crate::util::{Deadline, hex4};
@@ -31,6 +34,12 @@ const DEVICES: [(u16, u16, bool, &str); 3] = [
 ];
 const CMD_BATTERY: u8 = 0x30;
 const WAIT_MS: u64 = 700;
+/// A level that changes by more than this within one poll is a source switch or a misread, not a
+/// battery that filled up in a minute. The cable can claim 100 % while the receiver still reports
+/// the real level; switching between the two answers made the icon jump.
+const MAX_JUMP: i32 = 12;
+/// A big change is accepted once it has held for this long (a real charge over a longer gap).
+const JUMP_SETTLE: Duration = Duration::from_secs(5 * 60);
 
 /// The output report, report ID 0 first.
 pub fn request() -> [u8; 65] {
@@ -127,16 +136,70 @@ fn read(c: &HidColl, receiver: bool) -> Option<(i32, bool)> {
     None
 }
 
-/// The cable and the 2.4 GHz receiver of AJ139 are the same mouse. Its cable answer can report
-/// 100% as soon as it is plugged in, even while the receiver reports the real level (e.g. 50%).
-/// Keep the receiver's level and use the cable only as the charging source. When only one of the
-/// two is present, that one is read as before.
-fn pair_reading(receiver: Option<(i32, bool)>, cable: Option<(i32, bool)>, cable_present: bool) -> Option<(i32, bool, &'static str)> {
-    match (receiver, cable) {
-        (Some((level, power)), _) if level > 0 => Some((level, power || cable_present, "2.4 GHz receiver")),
-        (_, Some((level, power))) => Some((level, power || cable_present, "USB cable")),
-        _ => None,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Receiver,
+    Cable,
+}
+
+impl Source {
+    fn via(self) -> &'static str {
+        match self {
+            Self::Receiver => "2.4 GHz receiver",
+            Self::Cable => "USB cable",
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+struct Stable {
+    level: i32,
+    charging: bool,
+    source: Source,
+    /// Time of the last real reading: a big jump is only trusted after this was this old.
+    at: Instant,
+}
+
+static LAST: Mutex<Option<Stable>> = Mutex::new(None);
+
+/// The cable and the 2.4 GHz receiver of AJ139 are the same mouse. Its cable answer can report
+/// 100 % as soon as it is plugged in, even while the receiver reports the real level (e.g. 50 %).
+/// The receiver is authoritative whenever it is plugged in; the cable only adds charging, and a
+/// silent / zero receiver never replaces the last known level with the cable's 100 %. When only the
+/// cable is present, implausible jumps are held until they have lasted a few minutes.
+fn choose_reading(
+    receiver_present: bool,
+    cable_present: bool,
+    receiver: Option<(i32, bool)>,
+    cable: Option<(i32, bool)>,
+    last: Option<Stable>,
+) -> Option<Stable> {
+    let now = Instant::now();
+    if receiver_present {
+        if let Some((level, power)) = receiver.filter(|(level, _)| *level > 0) {
+            return Some(Stable { level, charging: power || cable_present, source: Source::Receiver, at: now });
+        }
+        // The receiver exists but the mouse is silent / off. With the cable in, keep showing the
+        // last receiver level as charging; without a level yet, show an unknown level, not 100 %.
+        if cable_present {
+            if let Some(prev) = last.filter(|s| s.source == Source::Receiver && s.level >= 0) {
+                return Some(Stable { charging: true, at: prev.at, ..prev });
+            }
+            return Some(Stable { level: -1, charging: true, source: Source::Receiver, at: now });
+        }
+        return None;
+    }
+    let Some((level, power)) = cable else {
+        return None;
+    };
+    let charging = power || cable_present;
+    if let Some(prev) = last
+        && (level - prev.level).abs() > MAX_JUMP
+        && now.duration_since(prev.at) < JUMP_SETTLE
+    {
+        return Some(Stable { charging: prev.charging || charging, at: prev.at, ..prev });
+    }
+    Some(Stable { level, charging, source: Source::Cable, at: now })
 }
 
 pub fn poll(ctx: &mut PollContext) {
@@ -189,20 +252,21 @@ pub fn poll(ctx: &mut PollContext) {
         }
     }
     if receiver_present || cable_present {
-        let (percent, charging, via) = pair_reading(receiver, cable, cable_present)
-            .map(|(p, c, v)| (p, c, v))
-            .unwrap_or((-1, false, if receiver_present { "2.4 GHz receiver" } else { "USB cable" }));
+        let mut cached = *LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let picked = choose_reading(receiver_present, cable_present, receiver, cable, cached);
+        cached = picked;
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = cached;
         let hw = if receiver_present { (RECEIVER_VID, PID) } else { (CABLE_VID, PID) };
         let s = DeviceStatus {
             key: format!("ajazz139:{}:{}", hex4(RECEIVER_VID), hex4(PID)),
             name: "AJAZZ wireless mouse".into(),
             kind: DeviceKind::Mouse,
-            via: via.into(),
+            via: picked.map(|s| s.source.via()).unwrap_or(if receiver_present { "2.4 GHz receiver" } else { "USB cable" }).into(),
             hw: Some(hw),
             grace_sec: 1800,
-            connected: percent >= 0,
-            percent,
-            charging,
+            connected: picked.is_some(),
+            percent: picked.map(|s| s.level).unwrap_or(-1),
+            charging: picked.is_some_and(|s| s.charging),
             ..Default::default()
         };
         ctx.add(s, RECEIVER_VID, PID);
@@ -369,16 +433,67 @@ mod tests {
         assert!(!should_try_freq_query(false, true, true));
     }
 
+    fn snapshot(s: Option<Stable>) -> Option<(i32, bool, Source)> {
+        s.map(|s| (s.level, s.charging, s.source))
+    }
+
     #[test]
     fn cable_does_not_overwrite_the_receiver_level() {
-        // Plugged in: the cable reports 100%, the receiver still reports the real 50%.
-        assert_eq!(pair_reading(Some((50, false)), Some((100, true)), true), Some((50, true, "2.4 GHz receiver")));
-        // A receiver level of 0 means off / out of range: use the cable's answer then.
-        assert_eq!(pair_reading(Some((0, false)), Some((76, true)), true), Some((76, true, "USB cable")));
-        // Only one connection present (or answering): keep its own level.
-        assert_eq!(pair_reading(Some((50, false)), None, false), Some((50, false, "2.4 GHz receiver")));
-        assert_eq!(pair_reading(None, Some((76, true)), true), Some((76, true, "USB cable")));
-        assert_eq!(pair_reading(Some((0, false)), None, true), None);
-        assert_eq!(pair_reading(None, None, false), None);
+        // Plugged in: the cable reports 100 %, the receiver still reports the real 50 %.
+        assert_eq!(
+            snapshot(choose_reading(true, true, Some((50, false)), Some((100, true)), None)),
+            Some((50, true, Source::Receiver))
+        );
+        // Only one connection present: keep its own level.
+        assert_eq!(
+            snapshot(choose_reading(true, false, Some((50, false)), None, None)),
+            Some((50, false, Source::Receiver))
+        );
+        assert_eq!(
+            snapshot(choose_reading(false, true, None, Some((76, true)), None)),
+            Some((76, true, Source::Cable))
+        );
+        assert_eq!(snapshot(choose_reading(true, false, Some((0, false)), None, None)), None);
+        assert_eq!(snapshot(choose_reading(false, false, None, None, None)), None);
+    }
+
+    #[test]
+    fn a_silent_receiver_holds_its_last_level_instead_of_jumping_to_the_cable() {
+        let prev = Stable { level: 50, charging: false, source: Source::Receiver, at: Instant::now() };
+        assert_eq!(
+            snapshot(choose_reading(true, true, Some((0, false)), Some((100, true)), Some(prev))),
+            Some((50, true, Source::Receiver))
+        );
+        // With no level ever read, show an unknown level rather than the inflated cable 100 %.
+        assert_eq!(
+            snapshot(choose_reading(true, true, Some((0, false)), Some((100, true)), None)),
+            Some((-1, true, Source::Receiver))
+        );
+    }
+
+    #[test]
+    fn a_sudden_change_from_the_cable_waits_a_few_minutes() {
+        let prev = Stable { level: 40, charging: true, source: Source::Cable, at: Instant::now() };
+        assert_eq!(
+            snapshot(choose_reading(false, true, None, Some((100, true)), Some(prev))),
+            Some((40, true, Source::Cable))
+        );
+        let old = Stable { at: Instant::now() - JUMP_SETTLE - Duration::from_secs(1), ..prev };
+        assert_eq!(
+            snapshot(choose_reading(false, true, None, Some((100, true)), Some(old))),
+            Some((100, true, Source::Cable))
+        );
+        // Small changes are real charges and go through at once.
+        let prev = Stable { at: Instant::now(), ..prev };
+        assert_eq!(
+            snapshot(choose_reading(false, true, None, Some((41, true)), Some(prev))),
+            Some((41, true, Source::Cable))
+        );
+    }
+
+    #[test]
+    fn source_labels() {
+        assert_eq!(Source::Receiver.via(), "2.4 GHz receiver");
+        assert_eq!(Source::Cable.via(), "USB cable");
     }
 }
