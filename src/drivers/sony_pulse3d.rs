@@ -1,6 +1,6 @@
 //! Sony PlayStation wireless headsets whose 2.4 GHz dongle pushes the same 8-byte `B0` status
 //! report: PULSE 3D (CFI-ZWH1) on `054C:0D5E` (issue #437), Gold wireless headset (CUHYA-0080,
-//! "Gold V2") on `12BA:0035` and Platinum wireless headset on `12BA:0050`.
+//! "Gold V2") on `12BA:0035` and Platinum wireless headset on `12BA:0050`. 
 //!
 //! Protocol from HeadsetControl (MIT, lib/devices/sony_pulse_3d.hpp) for the PULSE 3D and from
 //! hid-playstation-headset (counter185, GPL-2.0, README) for the Gold / Platinum receivers. The
