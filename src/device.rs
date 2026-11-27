@@ -17,6 +17,10 @@ pub enum DeviceKind {
     Microphone,
     /// In-ear headphones (a left and a right bud).
     Earbuds,
+    /// The system sensors of sysmon.rs (CPU, GPU, RAM): not battery devices.
+    Cpu,
+    Gpu,
+    Memory,
 }
 
 impl DeviceKind {
@@ -30,6 +34,8 @@ impl DeviceKind {
             DeviceKind::Phone => '\u{E8EA}',
             DeviceKind::Microphone => '\u{E720}',
             DeviceKind::Other => '\u{E83F}',
+            // Not used: device_icon draws these kinds' names as text instead.
+            DeviceKind::Cpu | DeviceKind::Gpu | DeviceKind::Memory => '\u{E83F}',
         }
     }
 
@@ -47,6 +53,9 @@ impl DeviceKind {
             DeviceKind::Phone => n_("Phone"),
             DeviceKind::Microphone => n_("Microphone"),
             DeviceKind::Earbuds => n_("Earbuds"),
+            DeviceKind::Cpu => n_("CPU"),
+            DeviceKind::Gpu => n_("GPU"),
+            DeviceKind::Memory => n_("RAM"),
             DeviceKind::Other => n_("Device"),
         }
     }
@@ -119,6 +128,8 @@ pub struct DeviceStatus {
     /// false: receiver present, device switched off.
     pub connected: bool,
     pub millivolts: i32,
+    /// The system sensors' temperature in °C; -1 when it is not measured.
+    pub temp: i32,
     /// Keep showing the last value this long if the device stops answering.
     pub grace_sec: u32,
     pub vid: u16,
@@ -145,6 +156,7 @@ impl Default for DeviceStatus {
             asleep: false,
             connected: true,
             millivolts: 0,
+            temp: -1,
             grace_sec: 0,
             vid: 0,
             hw: None,
@@ -184,6 +196,12 @@ impl DeviceStatus {
     /// Charging (on power, not yet full).
     pub fn is_charging(&self) -> bool {
         self.connected && self.charging && !self.is_full()
+    }
+
+    /// A system sensor of sysmon.rs (CPU, GPU, RAM): its percent is the load, not a battery
+    /// level, so it takes no battery history, warnings or figures.
+    pub fn is_system(&self) -> bool {
+        matches!(self.kind, DeviceKind::Cpu | DeviceKind::Gpu | DeviceKind::Memory)
     }
 
     /// Level text: "32%", a coarse level ("Low"), or "?".
