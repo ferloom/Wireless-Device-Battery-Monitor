@@ -1,23 +1,26 @@
-//! Sony PULSE 3D wireless headset (CFI-ZWH1) on its 2.4 GHz dongle `054C:0D5E` (issue #437).
+//! Sony PlayStation wireless headsets whose 2.4 GHz dongle pushes the same 8-byte `B0` status
+//! report: PULSE 3D (CFI-ZWH1) on `054C:0D5E` (issue #437), Gold wireless headset (CUHYA-0080,
+//! "Gold V2") on `12BA:0035` and Platinum wireless headset on `12BA:0050`.
 //!
-//! Protocol from HeadsetControl (MIT, lib/devices/sony_pulse_3d.hpp): interface 3 has a vendor
-//! collection `FF01:0020`; the dongle never answers a query, it *pushes* an 8-byte status report
-//! `B0` only when something changes (power, a button, the charger, a battery step about hourly):
+//! Protocol from HeadsetControl (MIT, lib/devices/sony_pulse_3d.hpp) for the PULSE 3D and from
+//! hid-playstation-headset (counter185, GPL-2.0, README) for the Gold / Platinum receivers. The
+//! dongle never answers a query, it *pushes* a status report `B0` only when something changes
+//! (power, a button, volume, the charger, a battery step about hourly):
 //!
-//!   B0 .. .. LL FF .. ..     LL = 0..100 in steps of 10, or 0x80 while charging
+//!   B0 .. .. LL FF .. ..     LL = 0..100, or 0x80 while charging
 //!                            FF bit 0x08 = headset connected
 //!
-//! The output report `B1` is rejected by the dongle, so nothing is ever sent. The collection is
-//! opened read-only, queued reports are drained, and the newest status is kept between reads; a
-//! poll that hears nothing keeps showing the last level. The remaining bytes are not decoded.
+//! Nothing is ever sent. The collection is opened read-only, queued reports are drained, and the
+//! newest status is kept between reads; a poll that hears nothing keeps showing the last level.
+//! The PULSE 3D's report sits on the vendor collection `FF01:0020`; the collection on the
+//! `12BA` receivers under Windows is not documented, so every non-mouse / keyboard collection with
+//! an 8-byte input report is listened to and only a `B0` report is accepted.
 use std::sync::Mutex;
 
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
 use crate::hid::{HidColl, HidDev};
 use crate::util::Deadline;
 
-const VID: u16 = 0x054C;
-const PID: u16 = 0x0D5E;
 const STATUS_ID: u8 = 0xB0;
 const BYTE_LEVEL: usize = 3;
 const BYTE_FLAGS: usize = 4;
@@ -28,6 +31,41 @@ const MAX_DRAIN_READS: usize = 64;
 /// At start-up a level can be absent: wait briefly for the headset's next change report.
 const FIRST_LISTEN_MS: u64 = 1500;
 const DRAIN_MS: u64 = 50;
+/// The PlayStation brand colour is keyed on Sony's vendor id, also for the licensed `12BA` dongles.
+const SONY_VID: u16 = 0x054C;
+
+#[derive(Clone, Copy)]
+enum Collection {
+    /// One known vendor collection (page, usage).
+    Exact(u16, u16),
+    /// Not documented: any collection that is not a mouse / keyboard and carries 8-byte input reports.
+    AnyNonDesktop,
+}
+
+struct Model {
+    vid: u16,
+    pid: u16,
+    key: &'static str,
+    name: &'static str,
+    collection: Collection,
+}
+
+const COUNT: usize = 3;
+static MODELS: [Model; COUNT] = [
+    Model { vid: 0x054C, pid: 0x0D5E, key: "sony:pulse3d", name: "Sony PULSE 3D", collection: Collection::Exact(0xFF01, 0x0020) },
+    Model { vid: 0x12BA, pid: 0x0035, key: "sony:gold-wireless", name: "Sony Gold Wireless", collection: Collection::AnyNonDesktop },
+    Model { vid: 0x12BA, pid: 0x0050, key: "sony:platinum-wireless", name: "Sony Platinum Wireless", collection: Collection::AnyNonDesktop },
+];
+
+impl Collection {
+    fn matches(self, c: &HidColl) -> bool {
+        c.in_len() >= 8
+            && match self {
+                Collection::Exact(page, usage) => c.page() == page && c.usage() == usage,
+                Collection::AnyNonDesktop => c.page() != 0x01,
+            }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Status {
@@ -60,11 +98,7 @@ fn decode(r: &[u8]) -> Option<Status> {
 fn remember(last: &mut Option<Status>, r: &[u8]) {
     let Some(new) = decode(r) else { return };
     let old = last.unwrap_or_default();
-    *last = Some(Status {
-        level: new.level.or(old.level),
-        charging: new.charging,
-        connected: new.connected,
-    });
+    *last = Some(Status { level: new.level.or(old.level), charging: new.charging, connected: new.connected });
 }
 
 /// Drains what the dongle has already queued. `first` waits a little longer at start-up.
@@ -90,32 +124,34 @@ fn listen(c: &HidColl, first: bool) -> Option<Status> {
     last
 }
 
-static LAST: Mutex<Option<Status>> = Mutex::new(None);
+static LAST: Mutex<[Option<Status>; COUNT]> = Mutex::new([None; COUNT]);
 
-fn poll_all(ctx: &mut PollContext, first_listen: bool) {
-    if ctx.is_claimed(VID, PID) || crate::device::is_ignored(VID, PID) {
+fn poll_model(ctx: &mut PollContext, i: usize, first_listen: bool) {
+    let m = &MODELS[i];
+    if ctx.is_claimed(m.vid, m.pid) || crate::device::is_ignored(m.vid, m.pid) {
         return;
     }
-    let colls = ctx.find(VID, PID, |c| c.page() == 0xFF01 && c.usage() == 0x0020 && c.in_len() >= 8);
+    let colls = ctx.find(m.vid, m.pid, |c| m.collection.matches(c));
     if colls.is_empty() {
-        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        LAST.lock().unwrap_or_else(|e| e.into_inner())[i] = None;
         return;
     }
-    let known = *LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let known = LAST.lock().unwrap_or_else(|e| e.into_inner())[i];
     let fresh = colls.iter().find_map(|c| listen(c, first_listen && known.is_none()));
     let status = {
         let mut guard = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = fresh {
-            *guard = Some(s);
+            guard[i] = Some(s);
         }
-        guard.unwrap_or_default()
+        guard[i].unwrap_or_default()
     };
     let s = DeviceStatus {
-        key: "sony:pulse3d".into(),
-        name: "Sony PULSE 3D".into(),
+        key: m.key.into(),
+        name: m.name.into(),
         kind: DeviceKind::Headset,
         via: "Wireless adapter".into(),
-        hw: Some((VID, PID)),
+        vid: SONY_VID,
+        hw: Some((m.vid, m.pid)),
         // The headset only sends a battery step about once an hour.
         grace_sec: 3600,
         connected: status.connected,
@@ -123,7 +159,13 @@ fn poll_all(ctx: &mut PollContext, first_listen: bool) {
         charging: status.charging,
         ..Default::default()
     };
-    ctx.add(s, VID, PID);
+    ctx.add(s, m.vid, m.pid);
+}
+
+fn poll_all(ctx: &mut PollContext, first_listen: bool) {
+    for i in 0..COUNT {
+        poll_model(ctx, i, first_listen);
+    }
 }
 
 pub fn poll(ctx: &mut PollContext) {
@@ -150,6 +192,14 @@ mod tests {
         assert_eq!(decode(&report(LEVEL_CHARGING, FLAG_CONNECTED)), Some(Status { level: None, charging: true, connected: true }));
         assert_eq!(decode(&[0xB1, 0, 0, 70, FLAG_CONNECTED, 0, 0, 0]), None); // the rejected output id
         assert_eq!(decode(&report(70, FLAG_CONNECTED)[..7]), None);
+    }
+
+    #[test]
+    fn gold_receiver_report() {
+        // Sample from hid-playstation-headset: charging, flags 2D (VSS, connected, mode 2).
+        assert_eq!(decode(&[0xB0, 0x01, 0x08, 0x80, 0x2D, 0x14, 0x11, 0x00]), Some(Status { level: None, charging: true, connected: true }));
+        // Level 0x64 = 100 %, headset switched off (bit 3 clear).
+        assert_eq!(decode(&[0xB0, 0x03, 0x30, 0x64, 0x60, 0x00, 0x11, 0x00]), Some(Status { level: Some(100), charging: false, connected: false }));
     }
 
     #[test]
