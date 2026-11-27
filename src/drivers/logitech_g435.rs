@@ -6,8 +6,9 @@
 //! github.com/portyporty/g435-battery-percentage, a tray app made from a capture on this headset),
 //! as also used by TaskbarVitals (GPL-3.0, github.com/symNistaken/TaskbarVitals,
 //! src/drivers/logitech_g435_0adf.cpp, where it was checked on hardware that a read does not
-//! interrupt audio or the microphone); implemented here from those facts. Read every 5 minutes;
-//! no reply means the headset is off or out of range.
+//! interrupt audio or the microphone); implemented here from those facts. Read every minute while
+//! the headset answers, so charging shows up promptly; no reply means the headset is off or out of
+//! range, and those reads back off to 15 minutes so they do not keep a sleeping headset awake.
 //!
 //! `046D:0ACB` (older dongle): no CRC framing and no FF00 collection - the battery is readable
 //! only through the dongle's bootloader bridge on the vendor collection FFC0, report 6: enter
@@ -20,10 +21,11 @@
 //! later. GET_BATTERY is never a session's first command: dongles still in "remote mode 0"
 //! answer it with a junk voltage, and the reference reports the dongle hanging outright unless a
 //! wireless command went first - the connect status runs first, and the mode is switched to 1
-//! only when the first battery answer is implausible. Read at most every 15 minutes, like the
-//! reference. The dongle stays hidden from the rest of the driver chain (NEVER_TOUCH in
-//! device.rs); it is reached through `device::colls_of`, which is what keeps other drivers from
-//! probing it.
+//! only when the first battery answer is implausible. Read at most every minute while the headset
+//! answers and audio is silent; when it is off, back off to 15 minutes. The dongle stays hidden
+//! from the rest of the driver chain (NEVER_TOUCH in device.rs); it is reached through
+//! `device::colls_of`, which is what keeps other drivers from probing it. Charging is inferred from
+//! a rising voltage (there is no charging flag in either protocol).
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -38,14 +40,19 @@ const CAT_OTA: u8 = 0x06;
 const CAT_WIRELESS: u8 = 0x0E;
 const GET_MODE: u8 = 0xE0;
 const SET_MODE: u8 = 0xE1;
-const QUERY_EVERY: Duration = Duration::from_secs(5 * 60);
+/// An answering (on, possibly charging) headset is read every minute: a charge of 1 % can happen
+/// well inside the old 5 / 15 minute gaps, which made the level look stuck.
+const QUERY_EVERY: Duration = Duration::from_secs(60);
+const ACB_QUERY_EVERY: Duration = QUERY_EVERY;
 /// A headset that does not answer is left alone for this long. Polling it every minute kept a
-/// sleeping G435 awake (#399), so "off" now means a real backoff. The older dongle uses the same
-/// interval, and each of its sessions there costs its audio ~0.6 s.
-const ACB_QUERY_EVERY: Duration = Duration::from_secs(15 * 60);
-const OFF_QUERY_EVERY: Duration = ACB_QUERY_EVERY;
+/// sleeping G435 awake (#399), so "off" now means a real backoff.
+const OFF_QUERY_EVERY: Duration = Duration::from_secs(15 * 60);
 /// After a read blocked by audio (or a failed one) the next try waits at least this long.
 const ACB_RETRY: Duration = Duration::from_secs(60);
+/// A rising voltage marks charging; an equal voltage keeps it for a while (a full battery still
+/// charges), a falling one clears it. Hysteresis ignores small load-related wobble.
+const MV_HYSTERESIS: i32 = 3;
+const RISE_FLAT: Duration = Duration::from_secs(10 * 60);
 
 /// Session init from the capture (OTA IOCTL_READ_MAX_LEN, sequence 1 inside).
 const SESSION_INIT: [u8; 19] = [0x50, 0x41, 0x06, 0x01, 0x0D, 0x00, 0x25, 0x34, 0x12, 0x5A, 0x5A, 0x01, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x00, 0x00];
@@ -164,9 +171,36 @@ fn read_mv(c: &HidColl) -> Option<Option<i32>> {
 }
 
 #[derive(Clone, Copy)]
+struct Charge {
+    charging: bool,
+    rise_at: Instant,
+}
+
+impl Default for Charge {
+    fn default() -> Self {
+        Self { charging: false, rise_at: Instant::now() }
+    }
+}
+
+/// Charging is not reported by the headset: infer it from the voltage trend. A rise means it is
+/// on the charger, a drop means it is not; equal readings keep the state briefly (a full battery
+/// stops rising while still charging).
+fn charge_from_mv(prev: Option<i32>, mv: Option<i32>, old: Charge) -> Charge {
+    let Some(mv) = mv else {
+        return Charge::default();
+    };
+    match prev {
+        Some(p) if mv > p + MV_HYSTERESIS => Charge { charging: true, rise_at: Instant::now() },
+        Some(p) if mv + MV_HYSTERESIS < p => Charge { charging: false, rise_at: Instant::now() },
+        _ => Charge { charging: old.charging && old.rise_at.elapsed() < RISE_FLAT, rise_at: old.rise_at },
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Last {
     at: Instant,
     mv: Option<i32>,
+    charge: Charge,
 }
 
 static LAST: Mutex<Option<Last>> = Mutex::new(None);
@@ -182,12 +216,13 @@ fn poll_adf(ctx: &mut PollContext) {
     }
     let cached = *LAST.lock().unwrap_or_else(|e| e.into_inner());
     let fresh = cached.filter(|l| l.at.elapsed() < if l.mv.is_some() { QUERY_EVERY } else { OFF_QUERY_EVERY });
-    let mv = match fresh {
-        Some(l) => l.mv,
+    let (mv, charge) = match fresh {
+        Some(l) => (l.mv, l.charge),
         None => {
             let Some(mv) = colls.iter().find_map(read_mv) else { return };
-            *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(Last { at: Instant::now(), mv });
-            mv
+            let charge = charge_from_mv(cached.and_then(|l| l.mv), mv, cached.map(|l| l.charge).unwrap_or_default());
+            *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(Last { at: Instant::now(), mv, charge });
+            (mv, charge)
         }
     };
     let base = DeviceStatus {
@@ -200,7 +235,13 @@ fn poll_adf(ctx: &mut PollContext) {
         ..Default::default()
     };
     let s = match mv {
-        Some(mv) => DeviceStatus { percent: percent(mv), millivolts: mv, ..base },
+        Some(mv) => DeviceStatus {
+            percent: percent(mv),
+            millivolts: mv,
+            charging: charge.charging,
+            full: charge.charging && percent(mv) >= 100,
+            ..base
+        },
         None => DeviceStatus { connected: false, ..base },
     };
     ctx.add(s, VID, PID_ADF);
@@ -388,6 +429,7 @@ struct LastAcb {
     /// Some(Some(mv)) = level, Some(None) = headset off, None = unknown (audio was flowing, or
     /// no answer) - the last known level keeps showing while audio flows.
     mv: Option<Option<i32>>,
+    charge: Charge,
 }
 
 static LAST_ACB: Mutex<Option<LastAcb>> = Mutex::new(None);
@@ -409,14 +451,16 @@ fn poll_acb(ctx: &mut PollContext) {
         l.at.elapsed()
             < match l.mv {
                 Some(Some(_)) => ACB_QUERY_EVERY,
-                _ => ACB_RETRY,
+                Some(None) => OFF_QUERY_EVERY,
+                None => ACB_RETRY,
             }
     });
-    let mv = match fresh {
-        Some(l) => l.mv,
+    let (mv, charge) = match fresh {
+        Some(l) => (l.mv, l.charge),
         None => {
-            let mv = if audio_busy() {
-                cached.map(|l| l.mv).unwrap_or(None)
+            let (mv, charge) = if audio_busy() {
+                // No session while the dongle's audio is in use: keep the last level and state.
+                (cached.map(|l| l.mv).unwrap_or(None), cached.map(|l| l.charge).unwrap_or_default())
             } else {
                 let mv = colls.iter().find_map(acb_read);
                 match mv {
@@ -424,10 +468,11 @@ fn poll_acb(ctx: &mut PollContext) {
                     Some(None) => dbg("read: headset off"),
                     None => dbg("read: no answer"),
                 }
-                mv
+                let charge = charge_from_mv(cached.and_then(|l| l.mv).flatten(), mv.flatten(), cached.map(|l| l.charge).unwrap_or_default());
+                (mv, charge)
             };
-            *guard = Some(LastAcb { at: Instant::now(), mv });
-            mv
+            *guard = Some(LastAcb { at: Instant::now(), mv, charge });
+            (mv, charge)
         }
     };
     drop(guard);
@@ -441,7 +486,13 @@ fn poll_acb(ctx: &mut PollContext) {
         ..Default::default()
     };
     let s = match mv {
-        Some(Some(mv)) => DeviceStatus { percent: percent(mv), millivolts: mv, ..base },
+        Some(Some(mv)) => DeviceStatus {
+            percent: percent(mv),
+            millivolts: mv,
+            charging: charge.charging,
+            full: charge.charging && percent(mv) >= 100,
+            ..base
+        },
         Some(None) => DeviceStatus { connected: false, ..base },
         None => base,
     };
@@ -458,6 +509,23 @@ mod tests {
         assert_eq!(bridge_report(2, &[1, 2]), None);
         assert_eq!(bridge_report(3, &[1, 2]), Some(vec![6, 1, 2]));
         assert_eq!(bridge_report(5, &[1, 2]), Some(vec![6, 1, 2, 0, 0]));
+    }
+
+    #[test]
+    fn charging_is_inferred_from_the_voltage_trend() {
+        let now = Instant::now();
+        let flat = Charge { charging: false, rise_at: now };
+        assert!(!charge_from_mv(None, Some(3900), flat).charging);
+        let rising = charge_from_mv(Some(3900), Some(3920), flat);
+        assert!(rising.charging);
+        // Small wobble while on the battery does not look like charging.
+        assert!(!charge_from_mv(Some(3900), Some(3902), flat).charging);
+        // A flat voltage keeps the state briefly (full battery), then it expires.
+        assert!(charge_from_mv(Some(3920), Some(3920), rising).charging);
+        let old = Charge { charging: true, rise_at: now - RISE_FLAT - Duration::from_secs(1) };
+        assert!(!charge_from_mv(Some(4200), Some(4200), old).charging);
+        assert!(!charge_from_mv(Some(3920), Some(3880), rising).charging);
+        assert!(!charge_from_mv(Some(3920), None, rising).charging);
     }
 
     #[test]

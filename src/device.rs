@@ -307,6 +307,12 @@ struct HidCache {
 /// through the normal chain.
 const NEVER_TOUCH: [(u16, u16); 1] = [(0x046D, 0x0ACB)];
 
+/// Hidden from the shared chain, but its owning driver reads it directly, so a quick poll must
+/// still reach it. Otherwise the device vanishes from every quick read and is marked asleep.
+fn driver_reads_directly(ids: &[(u16, u16)]) -> bool {
+    ids.iter().any(|id| NEVER_TOUCH.contains(id))
+}
+
 fn hid_collections(rescan: bool) -> Vec<HidColl> {
     let mut cache = HID_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let paths = hid::interface_paths();
@@ -345,7 +351,10 @@ pub fn is_ignored(vid: u16, pid: u16) -> bool {
 /// Bluetooth, BLE and XInput are not touched.
 pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     let colls: Vec<HidColl> = hid_collections(false).into_iter().filter(|c| ids.contains(&(c.vid, c.pid)) && !NEVER_TOUCH.contains(&(c.vid, c.pid))).collect();
-    if colls.is_empty() {
+    // A NEVER_TOUCH product is reached by its owning driver through `colls_of`, not through this
+    // context. Without it there would be no quick reading at all: the taskbar would mark the device
+    // asleep every few seconds even while it is on (the old G435 dongle).
+    if colls.is_empty() && !driver_reads_directly(ids) {
         return Vec::new();
     }
     let mut ctx = PollContext { colls, ..Default::default() };
@@ -660,6 +669,13 @@ mod missing_tests {
         assert_eq!(b.weaker(), Some((40, true)));
         assert_eq!(Buds { left: -1, right: 70, ..Default::default() }.weaker(), Some((70, false)));
         assert_eq!(Buds { left: -1, right: -1, ..Default::default() }.weaker(), None);
+    }
+
+    #[test]
+    fn a_driver_owned_dongle_still_needs_quick_reads() {
+        assert!(driver_reads_directly(&[(0x046D, 0x0ACB)]));
+        assert!(!driver_reads_directly(&[(0x046D, 0x0ADF)]));
+        assert!(!driver_reads_directly(&[]));
     }
 
     #[test]
