@@ -127,8 +127,23 @@ fn read(c: &HidColl, receiver: bool) -> Option<(i32, bool)> {
     None
 }
 
+/// The cable and the 2.4 GHz receiver of AJ139 are the same mouse. Its cable answer can report
+/// 100% as soon as it is plugged in, even while the receiver reports the real level (e.g. 50%).
+/// Keep the receiver's level and use the cable only as the charging source. When only one of the
+/// two is present, that one is read as before.
+fn pair_reading(receiver: Option<(i32, bool)>, cable: Option<(i32, bool)>, cable_present: bool) -> Option<(i32, bool, &'static str)> {
+    match (receiver, cable) {
+        (Some((level, power)), _) if level > 0 => Some((level, power || cable_present, "2.4 GHz receiver")),
+        (_, Some((level, power))) => Some((level, power || cable_present, "USB cable")),
+        _ => None,
+    }
+}
+
 pub fn poll(ctx: &mut PollContext) {
-    for (vid, pid, cable, name) in DEVICES {
+    let mut receiver = None;
+    let mut cable = None;
+    let (mut receiver_present, mut cable_present) = (false, false);
+    for (vid, pid, is_cable, name) in DEVICES {
         if ctx.is_claimed(vid, pid) {
             continue;
         }
@@ -136,21 +151,61 @@ pub fn poll(ctx: &mut PollContext) {
         if colls.is_empty() {
             continue;
         }
-        let base = DeviceStatus {
-            key: format!("ajazz139:{}:{}", hex4(vid), hex4(pid)),
-            name: name.into(),
+        // Claim both ids even when no answer arrives: the other one, and the generic fallbacks,
+        // must not report this mouse a second time.
+        ctx.claim(vid, pid);
+        let found = colls.iter().find_map(|c| read(c, !is_cable));
+        if vid == RECEIVER_VID && pid == PID {
+            receiver_present = true;
+            receiver = found;
+        } else if is_cable {
+            cable_present = true;
+            cable = found;
+        } else {
+            let s = match found {
+                Some((level, power)) => DeviceStatus {
+                    key: format!("ajazz139:{}:{}", hex4(vid), hex4(pid)),
+                    name: name.into(),
+                    kind: DeviceKind::Mouse,
+                    via: "2.4 GHz receiver".into(),
+                    hw: Some((vid, pid)),
+                    grace_sec: 1800,
+                    percent: level,
+                    charging: power,
+                    ..Default::default()
+                },
+                None => DeviceStatus {
+                    key: format!("ajazz139:{}:{}", hex4(vid), hex4(pid)),
+                    name: name.into(),
+                    kind: DeviceKind::Mouse,
+                    via: "2.4 GHz receiver".into(),
+                    hw: Some((vid, pid)),
+                    grace_sec: 1800,
+                    connected: false,
+                    ..Default::default()
+                },
+            };
+            ctx.add(s, vid, pid);
+        }
+    }
+    if receiver_present || cable_present {
+        let (percent, charging, via) = pair_reading(receiver, cable, cable_present)
+            .map(|(p, c, v)| (p, c, v))
+            .unwrap_or((-1, false, if receiver_present { "2.4 GHz receiver" } else { "USB cable" }));
+        let hw = if receiver_present { (RECEIVER_VID, PID) } else { (CABLE_VID, PID) };
+        let s = DeviceStatus {
+            key: format!("ajazz139:{}:{}", hex4(RECEIVER_VID), hex4(PID)),
+            name: "AJAZZ wireless mouse".into(),
             kind: DeviceKind::Mouse,
-            via: if cable { "USB cable" } else { "2.4 GHz receiver" }.into(),
-            hw: Some((vid, pid)),
+            via: via.into(),
+            hw: Some(hw),
             grace_sec: 1800,
+            connected: percent >= 0,
+            percent,
+            charging,
             ..Default::default()
         };
-        let s = match colls.iter().find_map(|c| read(c, !cable)) {
-            Some((level, power)) if cable || level > 0 => DeviceStatus { percent: level, charging: power || cable, ..base },
-            _ if cable => continue, // the cable alone gives nothing to show
-            _ => DeviceStatus { connected: false, ..base },
-        };
-        ctx.add(s, vid, pid);
+        ctx.add(s, RECEIVER_VID, PID);
     }
 }
 
@@ -312,5 +367,18 @@ mod tests {
         assert!(!should_try_freq_query(true, true, false));
         assert!(should_try_freq_query(true, true, true));
         assert!(!should_try_freq_query(false, true, true));
+    }
+
+    #[test]
+    fn cable_does_not_overwrite_the_receiver_level() {
+        // Plugged in: the cable reports 100%, the receiver still reports the real 50%.
+        assert_eq!(pair_reading(Some((50, false)), Some((100, true)), true), Some((50, true, "2.4 GHz receiver")));
+        // A receiver level of 0 means off / out of range: use the cable's answer then.
+        assert_eq!(pair_reading(Some((0, false)), Some((76, true)), true), Some((76, true, "USB cable")));
+        // Only one connection present (or answering): keep its own level.
+        assert_eq!(pair_reading(Some((50, false)), None, false), Some((50, false, "2.4 GHz receiver")));
+        assert_eq!(pair_reading(None, Some((76, true)), true), Some((76, true, "USB cable")));
+        assert_eq!(pair_reading(Some((0, false)), None, true), None);
+        assert_eq!(pair_reading(None, None, false), None);
     }
 }
