@@ -473,7 +473,8 @@ struct App {
     /// Since when the mouse is on neither the strip nor the card: the card closes shortly after,
     /// so the mouse can move from the strip onto it.
     card_away: Option<Instant>,
-    /// A card opened by a click stays until another click or the menu (#439): (device, strip).
+    /// A card opened by a click: (device, strip). Another click, the menu, or the mouse leaving
+    /// both the strip and the card closes it (#439).
     card_pinned: Option<(usize, HWND)>,
     /// The left button moved far enough to be a drag, not a click.
     drag_moved: bool,
@@ -1447,6 +1448,12 @@ fn hover_card_mode(mode: settings::HoverMode) -> settings::HoverMode {
     if mode == settings::HoverMode::Click { settings::HoverMode::Card } else { mode }
 }
 
+/// "Card on click" moves the card (and the short tooltip) out of hover: passing the mouse over
+/// the device must not open anything.
+fn hover_shows_popup(mode: settings::HoverMode, card_click: bool) -> bool {
+    !card_click && hover_card_mode(mode) != settings::HoverMode::Off
+}
+
 /// Map a battery level onto the part of the circle that is still visible after the top `gap` is
 /// opened: 87% means 87% of the *remaining* ring, not 87% of the whole circle.
 fn ring_fill_fraction(level: f32, gap: f32) -> f32 {
@@ -1869,14 +1876,16 @@ impl App {
             if self.ring && d.percent >= 0 {
                 // Ring style: the icon inside a ring filled clockwise to the level. On power the
                 // top segment moves aside (with round ends), the unfilled remainder fades away and
-                // a green bolt takes the gap; unplugging plays the same animation backwards.
+                // a bolt takes the gap; unplugging plays the same animation backwards.
                 let on_power = d.is_charging() || d.is_full();
                 let (open, fill, animating) = self.ring_charge_state(&d.key, on_power, d.percent, Instant::now());
                 if !animating {
                     self.ring_charge.remove(&d.key);
                 }
-                let green = ui::charging_color(light);
-                let ring_color = if on_power || animating { green } else { bolt_color.unwrap_or(if low { red } else { own }) };
+                // The ring and the bolt in its gap use the bolt's colour: green while charging,
+                // blue once the device reached 100% and is still on power.
+                let power_color = Self::ring_power_color(d, light);
+                let ring_color = if on_power || animating { power_color } else { bolt_color.unwrap_or(if low { red } else { own }) };
                 let dpx = px(28.0);
                 let thick = (2.5 * s).max(2.0);
                 let gap = RING_GAP * open;
@@ -2127,6 +2136,11 @@ impl App {
                 let _ = KillTimer(Some(self.main), TIMER_BADGE);
             }
         }
+    }
+
+    /// Colour of the ring and the bolt in its gap while on power.
+    fn ring_power_color(d: &DeviceStatus, light: bool) -> COLORREF {
+        ui::bolt_color(d, light).unwrap_or_else(|| ui::charging_color(light))
     }
 
     /// `(open, fill, animating)` for a ring: `open` 0..1 moves the top segment aside and fades in
@@ -4062,12 +4076,9 @@ impl App {
     /// between the two is crossed in a moment); TIMER_AWAY then watches where it is.
     fn leave_strip(&mut self) {
         self.tracking = false;
-        // A pinned card stays open, but the strip is no longer under the mouse: drop the hover
-        // highlight even then.
+        // The mouse is off the strip: drop the highlight. A card opened by click closes by the
+        // same away timer as a hover card - it only stays while the mouse is on the card itself.
         self.set_hovered(HWND::default());
-        if self.card_pinned.is_some() {
-            return;
-        }
         if !self.card.0.is_null() && self.card_anim.visible && self.card_anim.showing {
             self.card_away = Some(Instant::now());
             unsafe {
@@ -4082,9 +4093,6 @@ impl App {
     /// TIMER_AWAY: keeps the card while the mouse is on it, and closes it once the mouse has been
     /// on neither the card nor the strip for a moment.
     fn away_step(&mut self) {
-        if self.card_pinned.is_some() {
-            return;
-        }
         let mut pt = POINT::default();
         let under = unsafe { GetCursorPos(&mut pt).is_ok().then(|| WindowFromPoint(pt)) };
         if under.is_some_and(|w| w == self.card) && self.card_anim.showing {
@@ -4328,19 +4336,22 @@ impl App {
         let x = if vertical { y } else { x };
         let hit = self.view(on).and_then(|v| v.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| (h.2, h.0, h.1)));
         let mode = hit.and_then(|h| self.visible_at(h.0)).map_or(settings::HoverMode::Card, |d| settings::hover_mode(SETTINGS_KEY, &d.key));
-        // A pinned card owns the hover state: no highlight while it is open.
         let mode = hover_card_mode(mode);
+        // "Card on click": passing the mouse over the device must not open the card.
+        let card_click = hit.and_then(|h| self.visible_at(h.0)).is_some_and(|d| settings::card_on_click(SETTINGS_KEY, &d.key));
+        // Mouse on the strip: the card stays, whatever it was opened by. Cancel the away timer
+        // even when away_step() had just cleared `card_away` while the mouse was on the card.
+        self.card_away = None;
+        unsafe {
+            let _ = KillTimer(Some(self.main), TIMER_AWAY);
+        }
+        // A pinned card owns the hover state: no highlight while it is open.
         if self.card_pinned.is_some() {
             self.set_hovered(HWND::default());
             return;
         }
         // The hover highlight (like Windows' own taskbar buttons) in every mode, "Nothing" included.
         self.set_hovered(on);
-        if self.card_away.take().is_some() {
-            unsafe {
-                let _ = KillTimer(Some(self.main), TIMER_AWAY);
-            }
-        }
         if self.tip.0.is_null() {
             return;
         }
@@ -4362,6 +4373,11 @@ impl App {
             // The card (name, level, last 24 hours) above the hovered device, or the short
             // tooltip, or nothing (the device's "On hover" setting); nothing between devices.
             match (hit, mode) {
+                (Some(_), _) if !hover_shows_popup(mode, card_click) => {
+                    // Clicked cards are opened in click_device(), never by hovering.
+                    self.tooltip_off();
+                    self.hide_card();
+                }
                 (Some((i, from, to)), settings::HoverMode::Card) => {
                     self.tooltip_off();
                     self.show_card(i, on, from, to)
@@ -7434,6 +7450,29 @@ mod tests {
         assert_eq!(hover_card_mode(settings::HoverMode::Click), settings::HoverMode::Card);
         assert_eq!(hover_card_mode(settings::HoverMode::Tip), settings::HoverMode::Tip);
         assert_eq!(hover_card_mode(settings::HoverMode::Off), settings::HoverMode::Off);
+    }
+
+    #[test]
+    fn card_on_click_keeps_hover_quiet() {
+        use settings::HoverMode::{Card, Click, Off, Tip};
+        // Checked: nothing opens while the mouse merely passes over the device.
+        for mode in [Card, Tip, Off, Click] {
+            assert!(!hover_shows_popup(mode, true));
+        }
+        assert!(hover_shows_popup(Card, false));
+        assert!(hover_shows_popup(Tip, false));
+        assert!(hover_shows_popup(Click, false));
+        assert!(!hover_shows_popup(Off, false));
+    }
+
+    #[test]
+    fn ring_and_bolt_turn_blue_once_full() {
+        let dev = |percent, charging, full| DeviceStatus { percent, charging, full, ..Default::default() };
+        for light in [false, true] {
+            assert_eq!(App::ring_power_color(&dev(62, true, false), light), ui::charging_color(light));
+            assert_eq!(App::ring_power_color(&dev(100, true, false), light), ui::full_color(light));
+            assert_eq!(App::ring_power_color(&dev(100, true, true), light), ui::full_color(light));
+        }
     }
 
     #[test]
