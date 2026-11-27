@@ -1,4 +1,4 @@
-//! Sony INZONE H5 headset on its 2.4 GHz dongle (054C:0EBF).
+//! Sony INZONE H5 (054C:0EBF) and H9 II (054C:0FA8) headsets on their 2.4 GHz dongles.
 //!
 //! Protocol as documented by HeadsetControl (GPL-3.0, github.com/Sapd/HeadsetControl,
 //! lib/devices/protocols/sony_inzone_protocol.hpp and sony_inzone_h5.hpp); implemented here from
@@ -20,7 +20,8 @@ use crate::hid::{HidColl, HidDev};
 use crate::util::Deadline;
 
 const VID: u16 = 0x054C;
-const PID: u16 = 0x0EBF;
+const H5_PID: u16 = 0x0EBF;
+const H9_II_PID: u16 = 0x0FA8;
 const REPORT: u8 = 0x02;
 const LEN: usize = 64;
 const EID_BATTERY: u8 = 0x04;
@@ -92,26 +93,31 @@ fn read(c: &HidColl) -> Option<Option<(i32, bool)>> {
 }
 
 pub fn poll(ctx: &mut PollContext) {
-    if ctx.is_claimed(VID, PID) {
+    poll_model(ctx, H5_PID, "sony:inzone-h5", "Sony INZONE H5");
+    poll_model(ctx, H9_II_PID, "sony:inzone-h9-ii", "Sony INZONE H9 II");
+}
+
+fn poll_model(ctx: &mut PollContext, pid: u16, key: &str, name: &str) {
+    if ctx.is_claimed(VID, pid) {
         return;
     }
-    let colls = ctx.find(VID, PID, |c| c.page() == 0xFF04 && c.in_len() as usize == LEN && c.out_len() as usize == LEN);
+    let colls = ctx.find(VID, pid, |c| c.page() == 0xFF04 && c.in_len() as usize == LEN && c.out_len() as usize == LEN);
     if colls.is_empty() {
         return;
     }
     let base = DeviceStatus {
-        key: "sony:inzone-h5".into(),
-        name: "Sony INZONE H5".into(),
+        key: key.into(),
+        name: name.into(),
         kind: DeviceKind::Headset,
         via: "2.4 GHz receiver".into(),
-        hw: Some((VID, PID)),
+        hw: Some((VID, pid)),
         ..Default::default()
     };
     let s = match colls.iter().find_map(read) {
         Some(Some((level, charging))) => DeviceStatus { percent: level, charging, ..base },
         _ => DeviceStatus { connected: false, ..base },
     };
-    ctx.add(s, VID, PID);
+    ctx.add(s, VID, pid);
 }
 
 #[cfg(test)]
@@ -128,6 +134,13 @@ mod tests {
         b[14] = percent;
         b[n + 1] = b[5..=n].iter().fold(0u8, |a, &x| a.wrapping_add(x));
         b
+    }
+
+    #[test]
+    fn h9_ii_power_status() {
+        // Power-status reply captured from a connected H9 II on FF04:0001.
+        let reply = [0x02, 0x0E, 0x04, 0xFF, 0x0B, 0x00, 0x96, 0xC3, 0x14, 0x04, 0x10, 0x2A, 0x00, 0x00, 0x24, 0xCF];
+        assert_eq!(parse(&reply, 42), Some(Some((36, false))));
     }
 
     #[test]
