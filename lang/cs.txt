@@ -136,6 +136,7 @@ Show connection icons = Zobrazit ikony připojení
 Separate the connections again = Znovu oddělit připojení
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Spojit "{a}" a "{b}" jako jedno zařízení?\n\nJejich historie baterie a nastavení se spojí pod "{b}". Obě připojení pak ukazují jedno zařízení. Znovu je lze oddělit z nabídky zařízení; spojená historie zůstane zachována.
 Join with another connection = Spojit s jiným připojením
+Ask to join devices with the same name = Ptát se na spojení zařízení se stejným názvem
 Show on the taskbar = Zobrazit na hlavním panelu
 Show widget on = Zobrazit widget na
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Zobrazuje se na hlavním panelu a v BatteryHub. Zařízení si ponechá svůj název („{name}“).

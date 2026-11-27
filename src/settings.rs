@@ -20,6 +20,7 @@ use crate::device::{DeviceKind, DeviceStatus};
 use crate::i18n::{n_, tr, trf};
 use crate::install::{self as inst, HKCU};
 use crate::ui::{MenuIcons, glyph};
+use crate::util;
 
 /// The levels offered in the menus.
 pub const THRESHOLDS: [i32; 7] = [50, 40, 30, 20, 15, 10, 5];
@@ -544,6 +545,39 @@ pub fn clear_separated(settings_key: &str, key: &str) {
     }
 }
 
+// ---- one-time offer to join same-named connections ---------------------------------------------
+
+/// Global switch behind the device menu item. On by default; only the offer is switched off, an
+/// explicit "Join with another connection" always stays available.
+pub fn same_name_prompt(settings_key: &str) -> bool {
+    util::reg_get_dword(settings_key, "SameNameJoinPrompt").unwrap_or(1) != 0
+}
+
+pub fn set_same_name_prompt(settings_key: &str, on: bool) -> bool {
+    inst::create(HKCU, settings_key).is_some_and(|k| k.set_dword("SameNameJoinPrompt", on as u32))
+}
+
+/// Stable name of a pair, whatever order the two connections were found in.
+pub fn duplicate_pair_key(a: &str, b: &str) -> String {
+    if a <= b {
+        format!("{a}|{b}")
+    } else {
+        format!("{b}|{a}")
+    }
+}
+
+/// The offer is made once per pair and remembered across restarts, including when it was declined.
+pub fn duplicate_prompt_asked(settings_key: &str, a: &str, b: &str) -> bool {
+    inst::open(HKCU, &sub(settings_key, "SameNameAsked"), false)
+        .and_then(|k| k.get(&duplicate_pair_key(a, b)))
+        .as_deref()
+        == Some("1")
+}
+
+pub fn mark_duplicate_prompt_asked(settings_key: &str, a: &str, b: &str) -> bool {
+    inst::create(HKCU, &sub(settings_key, "SameNameAsked")).is_some_and(|k| k.set_string(&duplicate_pair_key(a, b), "1"))
+}
+
 /// Moves the settings of `from` under `to` (values already on `to` win), preserving their types.
 pub fn move_device_settings(settings_key: &str, from: &str, to: &str) {
     for name in DEVICE_SUBKEYS.iter().chain(["Seen", "Known"].iter()) {
@@ -662,6 +696,7 @@ const ITEM_HOVER_OFF: usize = 34;
 const ITEM_CARD_ON_CLICK: usize = 40;
 const ITEM_CARD_DISMISS_AWAY: usize = 44;
 const ITEM_CARD_DISMISS_CLICK: usize = 45;
+const ITEM_SAME_NAME_PROMPT: usize = 46;
 const ITEM_UNMERGE: usize = 41;
 const ITEM_CUSTOM_ICON: usize = 42;
 const ITEM_RESET_ICON: usize = 43;
@@ -673,7 +708,7 @@ const ITEM_GLOW: usize = 39;
 const _: () = assert!(ITEM_COLOR_PRESET + PRESETS.len() <= ITEM_HOVER_CARD && ITEM_BATTERY_ONLY < STRIDE);
 const _: () = assert!(ITEM_THRESHOLD + THRESHOLDS.len() <= ITEM_MOVE_BACK && ITEM_RESET_HISTORY < STRIDE);
 const _: () = assert!(ITEM_RESET_ICON < STRIDE);
-const _: () = assert!(ITEM_CARD_DISMISS_CLICK < STRIDE);
+const _: () = assert!(ITEM_CARD_DISMISS_CLICK < STRIDE && ITEM_SAME_NAME_PROMPT < STRIDE);
 
 /// What a device menu item asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -700,6 +735,8 @@ pub enum DeviceAction {
     ToggleGlow,
     /// Stop treating this connection as part of another device (#644).
     Unmerge,
+    /// Turn the one-time offer to join same-named connections on / off (global).
+    ToggleSameNamePrompt,
     /// Choose an ICO / PNG file as this device's icon (#476).
     CustomIcon,
     /// Go back to the built-in icon (#476).
@@ -810,6 +847,16 @@ pub fn append_device_menus(
             let check = if shown { MF_CHECKED } else { MF_UNCHECKED };
             let _ = AppendMenuW(sub, MF_STRING | check, id(ITEM_SHOW), &hs(&tr("Show on the taskbar")));
             icons.set(sub, id(ITEM_SHOW) as u32, false, glyph::VIEW);
+            // Global switch for the one-time offer. It lives here so it is right where the user
+            // can also join the two connections by hand.
+            let check = if same_name_prompt(settings_key) { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(
+                sub,
+                MF_STRING | check,
+                id(ITEM_SAME_NAME_PROMPT),
+                &hs(&tr("Ask to join devices with the same name")),
+            );
+            icons.set(sub, id(ITEM_SAME_NAME_PROMPT) as u32, false, glyph::SYNC);
             // Two connections of one physical device read as one (#644).
             let merged = merged_targets(settings_key);
             // A device already joined can only be separated, not joined again.
@@ -951,6 +998,7 @@ pub fn decode_menu_id(id: usize) -> Option<(usize, DeviceAction)> {
         ITEM_RISE_CHARGING => DeviceAction::ToggleRiseCharging,
         ITEM_GLOW => DeviceAction::ToggleGlow,
         ITEM_UNMERGE => DeviceAction::Unmerge,
+        ITEM_SAME_NAME_PROMPT => DeviceAction::ToggleSameNamePrompt,
         ITEM_CUSTOM_ICON => DeviceAction::CustomIcon,
         ITEM_RESET_ICON => DeviceAction::ResetIcon,
         ITEM_MOVE_BACK => DeviceAction::Move(false),
@@ -993,6 +1041,13 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_pair_keys_are_order_independent() {
+        assert_eq!(duplicate_pair_key("b", "a"), "a|b");
+        assert_eq!(duplicate_pair_key("a", "b"), "a|b");
+        assert_ne!(duplicate_pair_key("a", "b"), duplicate_pair_key("a", "c"));
+    }
+
+    #[test]
     fn only_the_old_ajazz_join_is_obsolete() {
         assert!(obsolete_merge("ajazz139:a8a4:2255", "ajazz139:a8a5:2255"));
         assert!(!obsolete_merge("ajazz139:a8a5:2255", "ajazz139:a8a4:2255"));
@@ -1019,6 +1074,7 @@ mod tests {
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_RED_ICON), Some((0, DeviceAction::ToggleRedIcon)));
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_THRESHOLD + THRESHOLDS.len()), None);
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_UNMERGE), Some((0, DeviceAction::Unmerge)));
+        assert_eq!(decode_menu_id(MENU_BASE + ITEM_SAME_NAME_PROMPT), Some((0, DeviceAction::ToggleSameNamePrompt)));
         assert_eq!(decode_menu_id(MENU_BASE + STRIDE + ITEM_CUSTOM_ICON), Some((1, DeviceAction::CustomIcon)));
         assert_eq!(decode_menu_id(MENU_BASE + STRIDE + ITEM_RESET_ICON), Some((1, DeviceAction::ResetIcon)));
     }

@@ -136,6 +136,7 @@ Show connection icons = Hiển thị biểu tượng kết nối
 Separate the connections again = Tách các kết nối lại
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Gộp "{a}" và "{b}" thành một thiết bị?\n\nLịch sử pin và cài đặt được gộp dưới "{b}". Hai kết nối sẽ hiển thị một thiết bị. Bạn có thể tách lại từ menu thiết bị; lịch sử đã gộp vẫn được giữ lại.
 Join with another connection = Gộp với kết nối khác
+Ask to join devices with the same name = Hỏi có nên gộp các thiết bị cùng tên không
 Show on the taskbar = Hiển thị trên thanh tác vụ
 Show widget on = Hiển thị tiện ích trên
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Hiển thị trên thanh tác vụ và trong BatteryHub. Bản thân thiết bị vẫn giữ tên của nó ("{name}").

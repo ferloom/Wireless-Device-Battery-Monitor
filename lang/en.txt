@@ -137,6 +137,7 @@ Show connection icons = Show connection icons
 Separate the connections again = Separate the connections again
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together.
 Join with another connection = Join with another connection
+Ask to join devices with the same name = Ask to join devices with the same name
 Show on the taskbar = Show on the taskbar
 Show widget on = Show widget on
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}").

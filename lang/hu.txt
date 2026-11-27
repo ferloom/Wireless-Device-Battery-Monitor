@@ -136,6 +136,7 @@ Show connection icons = Kapcsolati ikonok megjelenítése
 Separate the connections again = Kapcsolatok újra szétválasztása
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Összekapcsolja a(z) "{a}" és "{b}" eszközt egyként?\n\nAz akkumulátor-előzmények és beállítások a(z) "{b}" alá kerülnek. Mindkét kapcsolat ezután egy eszközt mutat. Az eszközmenüből újra szétválaszthatók; az összevont előzmények megmaradnak.
 Join with another connection = Összekapcsolás másik kapcsolattal
+Ask to join devices with the same name = Kérdezés az azonos nevű eszközök összekapcsolásáról
 Show on the taskbar = Megjelenítés a tálcán
 Show widget on = Widget megjelenítése itt
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = A tálcán és a BatteryHubban látszik. Maga az eszköz megtartja a nevét („{name}”).

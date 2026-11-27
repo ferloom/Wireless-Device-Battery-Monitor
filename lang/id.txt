@@ -136,6 +136,7 @@ Show connection icons = Tampilkan ikon koneksi
 Separate the connections again = Pisahkan kembali koneksi
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Gabungkan "{a}" dan "{b}" sebagai satu perangkat?\n\nRiwayat baterai dan pengaturannya digabung di bawah "{b}". Kedua koneksi lalu menampilkan satu perangkat. Anda dapat memisahkannya lagi dari menu perangkat; riwayat gabungan tetap tersimpan.
 Join with another connection = Gabung dengan koneksi lain
+Ask to join devices with the same name = Tanyakan untuk menggabungkan perangkat dengan nama yang sama
 Show on the taskbar = Tampilkan di taskbar
 Show widget on = Tampilkan widget di
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Ditampilkan di taskbar dan di BatteryHub. Perangkat itu sendiri tetap memakai namanya ("{name}").

@@ -136,6 +136,7 @@ Show connection icons = Visa anslutningsikoner
 Separate the connections again = Separera anslutningarna igen
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Slå ihop "{a}" och "{b}" som en enhet?\n\nBatterihistoriken och inställningarna slås ihop under "{b}". Båda anslutningarna visar sedan en enhet. Du kan separera dem igen från enhetsmenyn; den sammanslagna historiken behålls.
 Join with another connection = Slå ihop med annan anslutning
+Ask to join devices with the same name = Fråga om enheter med samma namn ska slås ihop
 Show on the taskbar = Visa i aktivitetsfältet
 Show widget on = Visa widgeten på
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Visas i aktivitetsfältet och i BatteryHub. Själva enheten behåller sitt namn ("{name}").

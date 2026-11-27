@@ -136,6 +136,7 @@ Show connection icons = Verbindungssymbole anzeigen
 Separate the connections again = Verbindungen wieder trennen
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = "{a}" und "{b}" als ein Gerät zusammenführen?\n\nAkkuverlauf und Einstellungen werden unter "{b}" zusammengeführt. Beide Verbindungen zeigen dann ein Gerät. Die Trennung ist später über das Gerätemenü möglich; der zusammengefasste Verlauf bleibt erhalten.
 Join with another connection = Mit einer anderen Verbindung zusammenführen
+Ask to join devices with the same name = Bei gleichen Namen fragen, ob Geräte zusammengeführt werden sollen
 Show on the taskbar = In der Taskleiste anzeigen
 Show widget on = Widget anzeigen auf
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Wird in der Taskleiste und in BatteryHub angezeigt. Das Gerät selbst behält seinen Namen („{name}“).

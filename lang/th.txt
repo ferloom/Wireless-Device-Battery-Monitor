@@ -136,6 +136,7 @@ Show connection icons = แสดงไอคอนการเชื่อม�
 Separate the connections again = แยกการเชื่อมต่ออีกครั้ง
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = รวม "{a}" และ "{b}" เป็นอุปกรณ์เดียวหรือไม่?\n\nประวัติแบตเตอรี่และการตั้งค่าจะถูกรวมภายใต้ "{b}" การเชื่อมต่อทั้งสองจะแสดงเป็นอุปกรณ์เดียว สามารถแยกอีกครั้งจากเมนูอุปกรณ์ได้ ประวัติที่รวมแล้วจะยังคงอยู่
 Join with another connection = รวมกับการเชื่อมต่ออื่น
+Ask to join devices with the same name = ถามว่าควรรวมอุปกรณ์ที่มีชื่อเดียวกันหรือไม่
 Show on the taskbar = แสดงบนทาสก์บาร์
 Show widget on = แสดงวิดเจ็ตบน
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = แสดงบนทาสก์บาร์และใน BatteryHub ตัวอุปกรณ์ยังคงใช้ชื่อของตัวเอง ("{name}")

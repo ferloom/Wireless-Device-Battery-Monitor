@@ -136,6 +136,7 @@ Show connection icons = Bağlantı simgelerini göster
 Separate the connections again = Bağlantıları yeniden ayır
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = "{a}" ve "{b}" tek bir cihaz olarak birleştirilsin mi?\n\nPil geçmişi ve ayarlar "{b}" altında birleştirilir. İki bağlantı da tek bir cihazı gösterir. Cihaz menüsünden yeniden ayrılabilirler; birleşik geçmiş korunur.
 Join with another connection = Başka bir bağlantıyla birleştir
+Ask to join devices with the same name = Aynı adlı cihazları birleştirip birleştirmemeyi sor
 Show on the taskbar = Görev çubuğunda göster
 Show widget on = Widget'ı şurada göster
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Görev çubuğunda ve BatteryHub'da gösterilir. Cihazın kendisi adını korur ("{name}").

@@ -136,6 +136,7 @@ Show connection icons = Показувати іконки підключення
 Separate the connections again = Знову роз’єднати підключення
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = Об’єднати «{a}» і «{b}» в один пристрій?\n\nІсторію акумулятора та налаштування буде об’єднано під «{b}». Обидва підключення показуватимуть один пристрій. Пізніше їх можна роз’єднати через меню пристрою; об’єднана історія збережеться.
 Join with another connection = Об’єднати з іншим підключенням
+Ask to join devices with the same name = Запитувати про об’єднання пристроїв з однаковою назвою
 Show on the taskbar = Показувати на панелі завдань
 Show widget on = Показувати віджет на
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Показується на панелі завдань і в BatteryHub. Сам пристрій зберігає свою назву («{name}»).

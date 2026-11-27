@@ -41,6 +41,8 @@ const WM_UPDATE_DOWNLOADED: u32 = WM_APP + 6;
 const WM_SHOW_UPDATED: u32 = WM_APP + 7;
 /// tray_probe found where a secondary taskbar's notification area begins.
 const WM_TRAY_PROBED: u32 = WM_APP + 8;
+/// A pair of same-named connections was found: ask once whether to join them.
+const WM_SAME_NAME_PROMPT: u32 = WM_APP + 10;
 /// Another window came to the front: copies over a full-screen window step aside at once.
 const WM_FOREGROUND: u32 = WM_APP + 20;
 /// A background write of the history finished (wparam: 1 = written).
@@ -591,6 +593,8 @@ struct App {
     names: std::collections::HashMap<String, String>,
     /// Connections joined into one device (#644): secondary key -> key that keeps the readings.
     merged: std::collections::HashMap<String, String>,
+    /// Same-named pair found in the latest read, waiting for the one-time offer on the UI thread.
+    duplicate_prompt: Option<(String, String)>,
     /// Keys of the devices with "Show on the taskbar" turned off.
     hidden: HashSet<String>,
     /// "Warn at 5%" state per device.
@@ -5321,7 +5325,45 @@ impl App {
             self.devchange = true;
             self.start_poll();
         }
+        if let Some(pair) = self.find_duplicate_pair() {
+            self.duplicate_prompt = Some(pair);
+            let _ = unsafe { PostMessageW(Some(self.main), WM_SAME_NAME_PROMPT, WPARAM(0), LPARAM(0)) };
+        }
     }
+
+    /// Finds two live connections the user sees under the same name. One offer per pair is kept in
+    /// the registry, so a declined (or accepted) offer never comes back after a restart.
+    fn find_duplicate_pair(&self) -> Option<(String, String)> {
+        if !settings::same_name_prompt(SETTINGS_KEY) {
+            return None;
+        }
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, t) in &self.devices {
+            if !t.status.connected || t.status.asleep || key.starts_with("demo:") || settings::is_merged(&self.merged, key) {
+                continue;
+            }
+            let name = t.status.name.trim();
+            if !name.is_empty() {
+                groups.entry(name.to_lowercase()).or_default().push(key.clone());
+            }
+        }
+        groups.values().find_map(|keys| {
+            first_unasked_pair(keys, |a, b| settings::duplicate_prompt_asked(SETTINGS_KEY, a, b))
+        })
+    }
+}
+
+/// First pair of same-named connections whose offer has not been made yet (oldest keys first).
+fn first_unasked_pair(keys: &[String], asked: impl Fn(&str, &str) -> bool) -> Option<(String, String)> {
+    for i in 0..keys.len() {
+        for j in i + 1..keys.len() {
+            let (a, b) = if keys[i] <= keys[j] { (&keys[i], &keys[j]) } else { (&keys[j], &keys[i]) };
+            if !asked(a, b) {
+                return Some((a.clone(), b.clone()));
+            }
+        }
+    }
+    None
 }
 
 impl App {
@@ -6748,6 +6790,10 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
             }
         }
         DeviceAction::Unmerge => separate_device(&d.key),
+        DeviceAction::ToggleSameNamePrompt => {
+            settings::set_same_name_prompt(SETTINGS_KEY, !settings::same_name_prompt(SETTINGS_KEY));
+            with_app(|a| a.paint());
+        }
         DeviceAction::CustomIcon => {
             let Some(main) = with_app(|a| a.main) else { return };
             let Some(path) = (unsafe { choose_icon(main) }) else { return };
@@ -6789,9 +6835,33 @@ fn join_devices(from: &DeviceStatus, to: &DeviceStatus) {
             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
         )
     };
-    if answer != IDYES {
-        return;
+    if answer == IDYES {
+        perform_join(from, to);
     }
+}
+
+/// The one-time offer found by a poll. It is marked as made before the question, so a "No", a
+/// closed dialog or a crash afterwards cannot bring it back. `join_devices` then asks the same
+/// question a user gets from the menu, without a second confirmation.
+fn on_same_name_prompt() {
+    let Some((a, b)) = with_app(|app| app.duplicate_prompt.take()).flatten() else {
+        return;
+    };
+    settings::mark_duplicate_prompt_asked(SETTINGS_KEY, &a, &b);
+    let Some(statuses) = with_app(|app| {
+        (
+            app.devices.get(&a).map(|t| t.status.clone()),
+            app.devices.get(&b).map(|t| t.status.clone()),
+        )
+    }) else {
+        return;
+    };
+    if let (Some(from), Some(to)) = statuses {
+        join_devices(&from, &to);
+    }
+}
+
+fn perform_join(from: &DeviceStatus, to: &DeviceStatus) {
     with_app(|a| {
         a.save_history_now();
         a.history.merge_series(&from.key, &to.key, batteryhub::history::gap_limit(refresh_minutes()));
@@ -7240,6 +7310,10 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 trim_memory();
                 LRESULT(0)
             }
+            WM_SAME_NAME_PROMPT => {
+                on_same_name_prompt();
+                LRESULT(0)
+            }
             WM_TIMER if wp.0 == TIMER_CARD => {
                 // Animation frames: no memory trim here (it runs ~60 times a second for 0.15 s).
                 with_app(|a| a.card_step());
@@ -7632,6 +7706,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_name_offer_is_made_once_per_pair() {
+        let keys = vec!["b".to_string(), "a".to_string(), "c".to_string()];
+        assert_eq!(first_unasked_pair(&keys, |_, _| false), Some(("a".into(), "b".into())));
+        assert_eq!(
+            first_unasked_pair(&keys, |a, b| a == "a" && b == "b"),
+            Some(("b".into(), "c".into()))
+        );
+        assert_eq!(first_unasked_pair(&keys, |_, _| true), None);
+        assert_eq!(first_unasked_pair(&keys[..1], |_, _| false), None);
+    }
 
     #[test]
     fn old_click_mode_is_a_normal_hover_card() {

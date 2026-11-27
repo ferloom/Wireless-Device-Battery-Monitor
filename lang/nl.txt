@@ -136,6 +136,7 @@ Show connection icons = Verbindingsiconen tonen
 Separate the connections again = Verbindingen opnieuw scheiden
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = "{a}" en "{b}" als één apparaat samenvoegen?\n\nDe batterijgeschiedenis en instellingen worden onder "{b}" samengevoegd. Beide verbindingen tonen dan één apparaat. U kunt ze later via het apparaatmenu weer scheiden; de samengevoegde geschiedenis blijft bewaard.
 Join with another connection = Samenvoegen met andere verbinding
+Ask to join devices with the same name = Vragen om apparaten met dezelfde naam samen te voegen
 Show on the taskbar = Tonen op de taakbalk
 Show widget on = Widget tonen op
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = Getoond op de taakbalk en in BatteryHub. Het apparaat zelf houdt zijn naam ("{name}").

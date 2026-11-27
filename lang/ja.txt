@@ -136,6 +136,7 @@ Show connection icons = 接続アイコンを表示
 Separate the connections again = 接続を再び分離
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = 「{a}」と「{b}」を1つのデバイスとして統合しますか？\n\nバッテリー履歴と設定は「{b}」の下に統合されます。両方の接続は1つのデバイスとして表示されます。デバイスのメニューから再度分離できます。統合された履歴は保持されます。
 Join with another connection = 別の接続と統合
+Ask to join devices with the same name = 同名のデバイスを統合するか確認する
 Show on the taskbar = タスクバーに表示
 Show widget on = ウィジェットの表示先
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = タスクバーと BatteryHub に表示されます。デバイス自体の名前 ("{name}") は変わりません。

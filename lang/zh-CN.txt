@@ -136,6 +136,7 @@ Show connection icons = 显示连接图标
 Separate the connections again = 再次分离连接
 Join "{a}" and "{b}" as one device?\n\nTheir battery history and settings are combined under "{b}". Both connections then show one device. They can be separated again from the device menu; the combined history stays together. = 要将“{a}”和“{b}”合并为一个设备吗？\n\n电池历史记录和设置将合并到“{b}”下。两个连接随后会显示为一个设备。可以从设备菜单再次分离；合并后的历史记录会保留。
 Join with another connection = 与其他连接合并
+Ask to join devices with the same name = 询问是否合并同名设备
 Show on the taskbar = 在任务栏上显示
 Show widget on = 小组件显示在
 Shown on the taskbar and in BatteryHub. The device itself keeps its name ("{name}"). = 显示在任务栏和 BatteryHub 中。设备本身保留其名称（“{name}”）。
