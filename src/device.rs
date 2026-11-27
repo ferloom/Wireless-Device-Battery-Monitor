@@ -398,7 +398,7 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     drivers::barracuda_x::poll(&mut ctx);
     drivers::hyperx_cloud2::poll(&mut ctx);
     drivers::rawm::poll(&mut ctx);
-    drivers::rapoo::poll_quick(&mut ctx); // short passive listen only; the full read waits for report 07
+    drivers::rapoo::poll_quick(&mut ctx); // short listen; the full read waits for report 07, and the VT3SE is asked briefly
     drivers::ninjutso::poll(&mut ctx);
     drivers::jabra::poll(&mut ctx);
     drivers::jbl_quantum800::poll(&mut ctx);
