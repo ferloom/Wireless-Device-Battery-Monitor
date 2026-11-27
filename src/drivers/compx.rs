@@ -46,7 +46,7 @@ const fn p(vid: u16, pid: u16, name: &'static str, group: &'static str, cable: b
     Product { vid, pid, name, group, cable }
 }
 
-const PRODUCTS: [Product; 24] = [
+const PRODUCTS: [Product; 25] = [
     p(0x3554, 0xF5BC, "Dark Project ME5 Pro", "darkproject-me5", false),
     p(0x3554, 0xF508, "Pulsar mouse", "pulsar1k", false),
     p(0x3554, 0xF509, "Pulsar mouse", "pulsar4k", false),
@@ -68,6 +68,8 @@ const PRODUCTS: [Product; 24] = [
     // ATK NK receiver: measured on an ATK A9 SE by HaloBattery (providers/pulsar.py, issue #347),
     // also listed by Joule; other ATK mice share it.
     p(0x373B, 0x10C9, "ATK mouse", "atk10c9", false),
+    // ATK Dragonfly A9 Mini+ on the "Wireless mouse 8k dongle-L": checked on hardware.
+    p(0x373B, 0x1278, "ATK mouse", "atk8k", false),
     // Pulsar XS-1 8K Gen.2 receiver and its wired TenZ identity; both use report 8.
     p(0x3710, 0x5406, "Pulsar TenZ", "pulsar-xs1", false),
     // 3710:3415 / interface 1 / FF02:0002 (17-byte reports), verified with the original BatteryHub.
