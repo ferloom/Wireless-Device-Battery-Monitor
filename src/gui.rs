@@ -282,6 +282,39 @@ impl Buffer {
         }
     }
 
+    /// Draws a user-chosen icon: premultiplied ARGB pixels (`custom_icon::Sprite`), source-over,
+    /// with an optional extra fade. The dashboard uses it for the device bar and the header.
+    pub fn rgba(&mut self, px: &[u32], w: i32, x: i32, y: i32, alpha: f32) {
+        if w <= 0 || alpha <= 0.0 {
+            return;
+        }
+        let (bw, bh) = (self.w, self.h);
+        let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+        if a == 0 {
+            return;
+        }
+        let h = (px.len() / w as usize) as i32;
+        let dst = self.px();
+        for yy in 0..h {
+            for xx in 0..w {
+                let (dx, dy) = (x + xx, y + yy);
+                if dx < 0 || dy < 0 || dx >= bw || dy >= bh {
+                    continue;
+                }
+                let s = px[(yy * w + xx) as usize];
+                let sa = ((s >> 24) & 0xFF) * a / 255;
+                if sa == 0 {
+                    continue;
+                }
+                let d = &mut dst[(dy * bw + dx) as usize];
+                let inv = 255 - sa;
+                let ch = |shift: u32| (((s >> shift) & 0xFF) * a / 255 + ((*d >> shift) & 0xFF) * inv / 255).min(255);
+                let na = (sa + ((*d >> 24) & 0xFF) * inv / 255).min(255);
+                *d = na << 24 | ch(16) << 16 | ch(8) << 8 | ch(0);
+            }
+        }
+    }
+
     /// Copies all pixels of `other` (same size) into this buffer.
     pub fn copy_from(&mut self, other: &mut Buffer) {
         if other.w == self.w && other.h == self.h {

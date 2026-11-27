@@ -6,7 +6,10 @@
 //!  * `Hidden`: "Show on the taskbar" turned off (DWORD 1; the device is still read and listed in
 //!    the menu, only the strip, its tooltip and the hover card skip it);
 //!  * `Known`: the last status of every device seen (REG_SZ, a dashboard status line), so the
-//!    dashboard can list devices that are not connected now but have saved history.
+//!    dashboard can list devices that are not connected now but have saved history;
+//!  * `Merged`: two connections of one device joined into one logical device (#644): the value
+//!    name is the secondary key, its data the key that keeps the history and settings;
+//!  * `IconFile`: path of a user-chosen ICO / PNG icon for the device (#476).
 use std::collections::{HashMap, HashSet};
 
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -118,6 +121,9 @@ pub enum HoverMode {
     Tip,
     /// Nothing.
     Off,
+    /// Legacy Hover=3 from before "Card on click" became its own setting (#439).
+    /// Read only: it now means the normal hover card plus the separate click option.
+    Click,
 }
 
 fn dword(settings_key: &str, name: &str, device_key: &str) -> Option<u32> {
@@ -133,16 +139,41 @@ pub fn hover_mode(settings_key: &str, device_key: &str) -> HoverMode {
     match dword(settings_key, "Hover", device_key) {
         Some(1) => HoverMode::Tip,
         Some(2) => HoverMode::Off,
+        Some(3) => HoverMode::Click,
         _ => HoverMode::Card,
     }
 }
 
 pub fn set_hover_mode(settings_key: &str, device_key: &str, m: HoverMode) -> bool {
+    // Someone on the old Hover=3 value keeps the click card when they pick a hover mode.
+    if m != HoverMode::Click && hover_mode(settings_key, device_key) == HoverMode::Click {
+        set_dword(settings_key, "CardOnClick", device_key, 1);
+    }
     set_dword(settings_key, "Hover", device_key, match m {
         HoverMode::Card => 0,
         HoverMode::Tip => 1,
         HoverMode::Off => 2,
+        // No longer written; kept only so old registries still decode.
+        HoverMode::Click => 3,
     })
+}
+
+/// Clicking the device opens its card and pins it until another click (#439). Independent of
+/// what the mouse does while merely passing over the device.
+fn click_card_enabled(hover: HoverMode, flag: bool) -> bool {
+    flag || hover == HoverMode::Click
+}
+
+pub fn card_on_click(settings_key: &str, device_key: &str) -> bool {
+    click_card_enabled(hover_mode(settings_key, device_key), dword(settings_key, "CardOnClick", device_key) == Some(1))
+}
+
+pub fn set_card_on_click(settings_key: &str, device_key: &str, on: bool) -> bool {
+    // Clear the legacy value first: set_hover_mode migrates it into this very setting.
+    if !on && hover_mode(settings_key, device_key) == HoverMode::Click {
+        set_hover_mode(settings_key, device_key, HoverMode::Card);
+    }
+    set_dword(settings_key, "CardOnClick", device_key, on as u32)
 }
 
 /// The card shows the battery chart (default on).
@@ -266,6 +297,25 @@ pub fn set_icon_color(settings_key: &str, device_key: &str, c: IconColor) -> boo
     inst::create(HKCU, &sub(settings_key, "IconColor")).is_some_and(|k| k.set_dword(device_key, encode_color(c)))
 }
 
+/// Path of the user's own icon (ICO, PNG, ...) for a device, if one was chosen (#476).
+pub fn icon_file(settings_key: &str, device_key: &str) -> Option<String> {
+    inst::open(HKCU, &sub(settings_key, "IconFile"), false)
+        .and_then(|k| k.get(device_key))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+pub fn set_icon_file(settings_key: &str, device_key: &str, path: &str) -> bool {
+    inst::create(HKCU, &sub(settings_key, "IconFile")).is_some_and(|k| k.set_string(device_key, path))
+}
+
+pub fn clear_icon_file(settings_key: &str, device_key: &str) -> bool {
+    inst::open(HKCU, &sub(settings_key, "IconFile"), true).is_none_or(|k| {
+        k.delete_value(device_key);
+        true
+    })
+}
+
 // ---- "Show on the taskbar" --------------------------------------------------------------------
 
 /// Keys of the devices hidden from the taskbar.
@@ -353,8 +403,8 @@ pub fn with_new_first(saved: &[String], new: &[String]) -> Vec<String> {
 pub const FORGET_SECS: u64 = crate::history::KEEP_SECS;
 
 /// Per-device settings, by subkey (a value per device key).
-const DEVICE_SUBKEYS: [&str; 13] =
-    ["Order", "Names", "Hidden", "Thresholds", "Warn5", "RedIcon", "IconColor", "Hover", "CardChart", "CardTime", "BatteryOnly", "RiseCharging", "Glow"];
+const DEVICE_SUBKEYS: [&str; 16] =
+    ["Order", "Names", "Hidden", "Thresholds", "Warn5", "RedIcon", "IconColor", "IconFile", "Hover", "CardOnClick", "CardChart", "CardTime", "BatteryOnly", "RiseCharging", "Glow", "Merged"];
 
 /// Deletes every setting BatteryHub keeps for one device (name, order, warning levels, colours,
 /// hover, when it was last seen and what it was): "Delete device" in the dashboard.
@@ -363,6 +413,64 @@ pub fn forget_device(settings_key: &str, device_key: &str) {
         if let Some(k) = inst::open(HKCU, &sub(settings_key, name), true) {
             k.delete_value(device_key);
         }
+    }
+}
+
+// ---- two connections of one device (#644) ------------------------------------------------------
+
+/// Joined devices: secondary key -> the key that keeps the shared history and settings.
+pub fn merged_targets(settings_key: &str) -> HashMap<String, String> {
+    inst::open(HKCU, &sub(settings_key, "Merged"), false)
+        .map(|k| {
+            k.values()
+                .into_iter()
+                .filter(|v| v.1 == 1)
+                .filter_map(|(n, _, d)| {
+                    let t = d.trim();
+                    (!t.is_empty() && t != n).then(|| (n, t.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Joins `member` into `target`: both connections are then read as one device.
+pub fn set_merged(settings_key: &str, member: &str, target: &str) -> bool {
+    member != target && inst::create(HKCU, &sub(settings_key, "Merged")).is_some_and(|k| k.set_string(member, target))
+}
+
+/// Separates a previously joined connection again.
+pub fn clear_merged(settings_key: &str, member: &str) -> bool {
+    inst::open(HKCU, &sub(settings_key, "Merged"), true).is_none_or(|k| {
+        k.delete_value(member);
+        true
+    })
+}
+
+/// The key under which readings of `key` belong. Chains and cycles are resolved to one root.
+pub fn resolve_merged(map: &HashMap<String, String>, key: &str) -> String {
+    let mut cur = key.to_string();
+    let mut seen = HashSet::new();
+    while let Some(next) = map.get(&cur) {
+        if next == &cur || !seen.insert(cur.clone()) {
+            break;
+        }
+        cur = next.clone();
+    }
+    cur
+}
+
+/// Moves the settings of `from` under `to` (values already on `to` win), preserving their types.
+pub fn move_device_settings(settings_key: &str, from: &str, to: &str) {
+    for name in DEVICE_SUBKEYS.iter().chain(["Seen", "Known"].iter()) {
+        let (Some(dst), Some(src)) = (inst::create(HKCU, &sub(settings_key, name)), inst::open(HKCU, &sub(settings_key, name), false)) else {
+            continue;
+        };
+        let has_dst = dst.get(to).is_some_and(|v| !v.is_empty() && v != "0x00000000");
+        if !has_dst {
+            let _ = dst.copy_value(&src, from, to);
+        }
+        let _ = dst.delete_value(from);
     }
 }
 
@@ -444,6 +552,10 @@ impl CriticalWarnings {
 /// Menu ids: BASE + device index * STRIDE + one of the item offsets below.
 pub const MENU_BASE: usize = 1000;
 const STRIDE: usize = 48;
+/// Ids of the dynamic "Join with..." submenu: BASE + device index * MERGE_STRIDE + target index.
+/// Kept far above the device ids so a menu command can never be mistaken for a device action.
+pub const MERGE_ID_BASE: usize = 10000;
+pub const MERGE_STRIDE: usize = 64;
 const ITEM_DASHBOARD: usize = 0;
 const ITEM_HISTORY: usize = 1;
 const ITEM_STATS: usize = 2;
@@ -463,6 +575,10 @@ const ITEM_COLOR_PRESET: usize = 26; // + index into PRESETS
 const ITEM_HOVER_CARD: usize = 32;
 const ITEM_HOVER_TIP: usize = 33;
 const ITEM_HOVER_OFF: usize = 34;
+const ITEM_CARD_ON_CLICK: usize = 40;
+const ITEM_UNMERGE: usize = 41;
+const ITEM_CUSTOM_ICON: usize = 42;
+const ITEM_RESET_ICON: usize = 43;
 const ITEM_CARD_CHART: usize = 35;
 const ITEM_CARD_TIME: usize = 36;
 const ITEM_BATTERY_ONLY: usize = 37;
@@ -470,6 +586,7 @@ const ITEM_RISE_CHARGING: usize = 38;
 const ITEM_GLOW: usize = 39;
 const _: () = assert!(ITEM_COLOR_PRESET + PRESETS.len() <= ITEM_HOVER_CARD && ITEM_BATTERY_ONLY < STRIDE);
 const _: () = assert!(ITEM_THRESHOLD + THRESHOLDS.len() <= ITEM_MOVE_BACK && ITEM_RESET_HISTORY < STRIDE);
+const _: () = assert!(ITEM_RESET_ICON < STRIDE);
 
 /// What a device menu item asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -485,11 +602,19 @@ pub enum DeviceAction {
     CustomColor,
     ToggleShown,
     Hover(HoverMode),
+    /// Open and pin the card on a left click, regardless of the hover setting (#439).
+    ToggleCardOnClick,
     ToggleCardChart,
     ToggleCardTime,
     ToggleBatteryOnly,
     ToggleRiseCharging,
     ToggleGlow,
+    /// Stop treating this connection as part of another device (#644).
+    Unmerge,
+    /// Choose an ICO / PNG file as this device's icon (#476).
+    CustomIcon,
+    /// Go back to the built-in icon (#476).
+    ResetIcon,
     Threshold(i32),
     /// One place to the left (up on a vertical taskbar), or to the right (down).
     Move(bool),
@@ -578,11 +703,46 @@ pub fn append_device_menus(
                 let _ = AppendMenuW(sub, MF_STRING | MF_POPUP, colors.0 as usize, &hs(&tr("Icon colour")));
                 icons.set(sub, n as u32, true, glyph::COLOR);
             }
+            // The user's own icon overrides the built-in one (#476).
+            let _ = AppendMenuW(sub, MF_STRING, id(ITEM_CUSTOM_ICON), &hs(&tr("Custom icon...")));
+            icons.set(sub, id(ITEM_CUSTOM_ICON) as u32, false, glyph::VIEW);
+            // Always show the reset entry, so it is easy to find after setting a custom icon; it is
+            // clickable only while an icon of the user's is actually saved.
+            let has_custom = icon_file(settings_key, &d.key).is_some();
+            let _ = AppendMenuW(
+                sub,
+                MF_STRING | if has_custom { MF_ENABLED } else { MF_GRAYED },
+                id(ITEM_RESET_ICON),
+                &hs(&tr("Use the built-in icon")),
+            );
+            icons.set(sub, id(ITEM_RESET_ICON) as u32, false, glyph::RESET);
             let _ = AppendMenuW(sub, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
             let shown = !hidden.contains(&d.key);
             let check = if shown { MF_CHECKED } else { MF_UNCHECKED };
             let _ = AppendMenuW(sub, MF_STRING | check, id(ITEM_SHOW), &hs(&tr("Show on the taskbar")));
             icons.set(sub, id(ITEM_SHOW) as u32, false, glyph::VIEW);
+            // Two connections of one physical device read as one (#644).
+            let merged = merged_targets(settings_key);
+            if devices.len() > 1 {
+                if let Ok(join) = CreatePopupMenu() {
+                    for (j, other) in devices.iter().enumerate() {
+                        if j == i {
+                            continue;
+                        }
+                        let label = format!("{} ({})", other.name, other.via);
+                        let on = merged.get(&d.key).is_some_and(|t| t == &other.key);
+                        let check = if on { MF_CHECKED } else { MF_UNCHECKED };
+                        let _ = AppendMenuW(join, MF_STRING | check, MERGE_ID_BASE + i * MERGE_STRIDE + j, &hs(&label));
+                    }
+                    let n = windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(Some(sub));
+                    let _ = AppendMenuW(sub, MF_STRING | MF_POPUP, join.0 as usize, &hs(&tr("Join with another connection")));
+                    icons.set(sub, n as u32, true, glyph::SYNC);
+                }
+            }
+            if merged.contains_key(&d.key) {
+                let _ = AppendMenuW(sub, MF_STRING, id(ITEM_UNMERGE), &hs(&tr("Separate the connections again")));
+                icons.set(sub, id(ITEM_UNMERGE) as u32, false, glyph::RESET);
+            }
             // What hovering the device shows, and what its card holds.
             if let Ok(hover) = CreatePopupMenu() {
                 let mode = hover_mode(settings_key, &d.key);
@@ -595,7 +755,7 @@ pub fn append_device_menus(
                     let _ = AppendMenuW(hover, MF_STRING | check(mode == m), id(item), &hs(&tr(label)));
                 }
                 let _ = AppendMenuW(hover, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
-                let card = if mode == HoverMode::Card && !only { MF_ENABLED } else { MF_GRAYED };
+                let card = if (matches!(mode, HoverMode::Card | HoverMode::Click) || card_on_click(settings_key, &d.key)) && !only { MF_ENABLED } else { MF_GRAYED };
                 let chart = card_chart(settings_key, &d.key) && !only;
                 let time = card_time(settings_key, &d.key) && !only;
                 let _ = AppendMenuW(hover, MF_STRING | card | check(chart), id(ITEM_CARD_CHART), &hs(&tr("Battery chart on the card")));
@@ -604,6 +764,11 @@ pub fn append_device_menus(
                 let _ = AppendMenuW(sub, MF_STRING | MF_POPUP, hover.0 as usize, &hs(&tr("On hover")));
                 icons.set(sub, n as u32, true, glyph::INFO);
             }
+            // Separate from "On hover": the card can stay on the mouse *and* open on a click.
+            let check = if card_on_click(settings_key, &d.key) { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(sub, MF_STRING | check, id(ITEM_CARD_ON_CLICK), &hs(&tr("Card on click")));
+            // No icon here on purpose: ModernMenu draws a check mark for checked items and the
+            // item's glyph for unchecked ones. A CHECK glyph would show a tick in both states.
             let check = if only { MF_CHECKED } else { MF_UNCHECKED };
             let _ = AppendMenuW(sub, MF_STRING | check, id(ITEM_BATTERY_ONLY), &hs(&tr("Battery only (no history, statistics or forecast)")));
             icons.set(sub, id(ITEM_BATTERY_ONLY) as u32, false, glyph::STATISTICS);
@@ -644,6 +809,13 @@ pub fn append_device_menus(
     }
 }
 
+/// Decodes a "Join with another connection" command into (device index, target device index).
+pub fn decode_merge_id(id: usize) -> Option<(usize, usize)> {
+    let rel = id.checked_sub(MERGE_ID_BASE)?;
+    let (dev, target) = (rel / MERGE_STRIDE, rel % MERGE_STRIDE);
+    (target > 0 && dev < 64 && target < 64).then_some((dev, target))
+}
+
 /// Decodes a menu id from `append_device_menus` into (device index, action).
 pub fn decode_menu_id(id: usize) -> Option<(usize, DeviceAction)> {
     let rel = id.checked_sub(MENU_BASE)?;
@@ -667,11 +839,15 @@ pub fn decode_menu_id(id: usize) -> Option<(usize, DeviceAction)> {
         ITEM_HOVER_CARD => DeviceAction::Hover(HoverMode::Card),
         ITEM_HOVER_TIP => DeviceAction::Hover(HoverMode::Tip),
         ITEM_HOVER_OFF => DeviceAction::Hover(HoverMode::Off),
+        ITEM_CARD_ON_CLICK => DeviceAction::ToggleCardOnClick,
         ITEM_CARD_CHART => DeviceAction::ToggleCardChart,
         ITEM_CARD_TIME => DeviceAction::ToggleCardTime,
         ITEM_BATTERY_ONLY => DeviceAction::ToggleBatteryOnly,
         ITEM_RISE_CHARGING => DeviceAction::ToggleRiseCharging,
         ITEM_GLOW => DeviceAction::ToggleGlow,
+        ITEM_UNMERGE => DeviceAction::Unmerge,
+        ITEM_CUSTOM_ICON => DeviceAction::CustomIcon,
+        ITEM_RESET_ICON => DeviceAction::ResetIcon,
         ITEM_MOVE_BACK => DeviceAction::Move(false),
         ITEM_MOVE_ON => DeviceAction::Move(true),
         ITEM_RESET_HISTORY => DeviceAction::ResetHistory,
@@ -690,6 +866,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn card_on_click_does_not_depend_on_hover_mode() {
+        assert!(click_card_enabled(HoverMode::Card, true));
+        assert!(click_card_enabled(HoverMode::Tip, true));
+        assert!(click_card_enabled(HoverMode::Off, true));
+        assert!(!click_card_enabled(HoverMode::Card, false));
+        // The old Hover=3 choice still works for someone upgrading.
+        assert!(click_card_enabled(HoverMode::Click, false));
+    }
+
+    #[test]
     fn menu_ids_round_trip() {
         for dev in 0..5 {
             for (j, t) in THRESHOLDS.iter().enumerate() {
@@ -701,9 +887,31 @@ mod tests {
         }
         assert_eq!(decode_menu_id(3), None);
         assert_eq!(decode_menu_id(MENU_BASE + 2 * STRIDE + ITEM_HOVER_TIP), Some((2, DeviceAction::Hover(HoverMode::Tip))));
+        assert_eq!(decode_menu_id(MENU_BASE + 2 * STRIDE + ITEM_CARD_ON_CLICK), Some((2, DeviceAction::ToggleCardOnClick)));
         assert_eq!(decode_menu_id(MENU_BASE + STRIDE + ITEM_BATTERY_ONLY), Some((1, DeviceAction::ToggleBatteryOnly)));
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_RED_ICON), Some((0, DeviceAction::ToggleRedIcon)));
         assert_eq!(decode_menu_id(MENU_BASE + ITEM_THRESHOLD + THRESHOLDS.len()), None);
+        assert_eq!(decode_menu_id(MENU_BASE + ITEM_UNMERGE), Some((0, DeviceAction::Unmerge)));
+        assert_eq!(decode_menu_id(MENU_BASE + STRIDE + ITEM_CUSTOM_ICON), Some((1, DeviceAction::CustomIcon)));
+        assert_eq!(decode_menu_id(MENU_BASE + STRIDE + ITEM_RESET_ICON), Some((1, DeviceAction::ResetIcon)));
+    }
+
+    #[test]
+    fn joined_connection_ids_and_keys() {
+        assert_eq!(decode_merge_id(MERGE_ID_BASE + 1 * MERGE_STRIDE + 2), Some((1, 2)));
+        assert_eq!(decode_merge_id(MERGE_ID_BASE + 63 * MERGE_STRIDE + 63), Some((63, 63)));
+        assert_eq!(decode_merge_id(MERGE_ID_BASE), None); // no target
+        assert_eq!(decode_merge_id(MERGE_ID_BASE + 64 * MERGE_STRIDE + 1), None);
+        assert_eq!(decode_merge_id(3), None);
+        let map = HashMap::from([
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "c".to_string()),
+            ("x".to_string(), "y".to_string()),
+            ("y".to_string(), "x".to_string()),
+        ]);
+        assert_eq!(resolve_merged(&map, "a"), "c");
+        assert_eq!(resolve_merged(&map, "c"), "c");
+        assert_eq!(resolve_merged(&map, "x"), "x"); // a cycle does not loop forever
     }
 
     #[test]

@@ -155,6 +155,44 @@ impl History {
         v
     }
 
+    /// Combines the readings of two connections of one physical device under `to` (#644).
+    /// Points are sorted by time (the kept key wins an exact tie) and START flags are rebuilt
+    /// with `gap`, so the shared statistics never bridge time that was not measured.
+    pub fn merge_series(&mut self, from: &str, to: &str, gap: u64) -> bool {
+        if from == to {
+            return false;
+        }
+        self.flush();
+        let mut moved = false;
+        for suffix in ["", "#L", "#R"] {
+            let src = format!("{from}{suffix}");
+            let dst = format!("{to}{suffix}");
+            let Some(other) = self.devices.remove(&src) else { continue };
+            moved = true;
+            let keep = self.devices.entry(dst).or_default();
+            let mut pts: Vec<Point> = keep.pts.drain(..).chain(other.pts).collect();
+            pts.sort_by_key(|p| p.t);
+            let mut prev: Option<u64> = None;
+            for p in &mut pts {
+                p.flags &= !START;
+                if prev.is_none_or(|t| p.t.saturating_sub(t) > gap) {
+                    p.flags |= START;
+                }
+                prev = Some(p.t);
+            }
+            keep.pts = pts;
+            if let Some(p) = other.pending
+                && keep.pending.is_none_or(|q| p.t >= q.t)
+            {
+                keep.pending = Some(p);
+            }
+        }
+        if moved {
+            self.dirty = true;
+        }
+        moved
+    }
+
     /// Latest reading of a device (stored or not).
     pub fn latest(&self, key: &str) -> Option<Point> {
         let s = self.devices.get(key)?;
@@ -397,6 +435,31 @@ mod tests {
         let segs = segments(p, 0, 8000);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].last().unwrap().t, 300);
+    }
+
+    #[test]
+    fn merging_connections_combines_points_and_rebuilds_gaps() {
+        let mut h = History::default();
+        h.record("bt", 0, 50, false, false, GAP);
+        h.record("bt", 60, 49, false, false, GAP);
+        h.record("2g", 30, 48, false, false, GAP);
+        h.record("2g", 2000, 47, true, false, GAP); // a long pause ends the first stretch
+        h.record("bt#L", 0, 70, false, false, GAP);
+        h.record("2g#L", 100, 69, false, false, GAP);
+        assert!(h.merge_series("bt", "2g", GAP));
+        assert!(!h.merge_series("bt", "2g", GAP)); // nothing left to move
+        assert!(!h.merge_series("2g", "2g", GAP));
+        assert!(h.points("bt").is_empty() && h.points("bt#L").is_empty());
+        let p = h.points("2g");
+        assert_eq!(p.iter().map(|p| (p.t, p.level, p.starts())).collect::<Vec<_>>(), vec![
+            (0, 50, true),
+            (30, 48, false),
+            (60, 49, false),
+            (2000, 47, true),
+        ]);
+        assert!(p[3].charging());
+        let l = h.points("2g#L");
+        assert_eq!(l.iter().map(|p| (p.t, p.starts())).collect::<Vec<_>>(), vec![(0, true), (100, false)]);
     }
 
     #[test]

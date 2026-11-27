@@ -332,6 +332,27 @@ impl HidDev {
         unsafe { HidD_SetFeature(self.h, buf.as_ptr() as *const c_void, buf.len() as u32) }
     }
 
+    /// Sends exactly `data.len()` bytes. A collection can publish feature reports of several
+    /// sizes: `feat_len()` is the largest of them, but HidD_SetFeature expects the size of the
+    /// report named by `data[0]`, so padding to the largest can be refused.
+    pub fn set_feature_exact(&self, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return false;
+        }
+        unsafe { HidD_SetFeature(self.h, data.as_ptr() as *const c_void, data.len() as u32) }
+    }
+
+    /// Reads exactly `len` bytes of one report (out[0] = report ID), for collections whose other
+    /// feature reports are larger than this one.
+    pub fn get_feature_exact(&self, report_id: u8, len: usize) -> Option<Vec<u8>> {
+        if len == 0 {
+            return None;
+        }
+        let mut out = vec![0u8; len];
+        out[0] = report_id;
+        unsafe { HidD_GetFeature(self.h, out.as_mut_ptr() as *mut c_void, len as u32) }.then_some(out)
+    }
+
     /// out[0] = report ID.
     pub fn get_feature(&self, report_id: u8) -> Option<Vec<u8>> {
         let len = self.c.feat_len() as usize;

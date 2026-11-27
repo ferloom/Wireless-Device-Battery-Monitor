@@ -59,6 +59,7 @@ features = [
   "Win32_UI_Input_Ime",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
+  "Win32_Graphics_Imaging",
   "Devices_Bluetooth",
   "Devices_Bluetooth_Advertisement",
   "Devices_Bluetooth_GenericAttributeProfile",

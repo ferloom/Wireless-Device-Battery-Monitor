@@ -24,7 +24,6 @@
 //! reference. The dongle stays hidden from the rest of the driver chain (NEVER_TOUCH in
 //! device.rs); it is reached through `device::colls_of`, which is what keeps other drivers from
 //! probing it.
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -40,9 +39,11 @@ const CAT_WIRELESS: u8 = 0x0E;
 const GET_MODE: u8 = 0xE0;
 const SET_MODE: u8 = 0xE1;
 const QUERY_EVERY: Duration = Duration::from_secs(5 * 60);
-const OFF_QUERY_EVERY: Duration = Duration::from_secs(60);
-/// How often the older dongle is read while it is silent (every session costs its audio ~0.6 s).
+/// A headset that does not answer is left alone for this long. Polling it every minute kept a
+/// sleeping G435 awake (#399), so "off" now means a real backoff. The older dongle uses the same
+/// interval, and each of its sessions there costs its audio ~0.6 s.
 const ACB_QUERY_EVERY: Duration = Duration::from_secs(15 * 60);
+const OFF_QUERY_EVERY: Duration = ACB_QUERY_EVERY;
 /// After a read blocked by audio (or a failed one) the next try waits at least this long.
 const ACB_RETRY: Duration = Duration::from_secs(60);
 
@@ -374,108 +375,10 @@ fn acb_read(c: &HidColl) -> Option<Option<i32>> {
 // ---- the audio gate: never cut a stream that is actually flowing ---------------------------
 //
 // While the 0ACB dongle is in the bridge its audio is stopped, so a session is only safe when
-// its own endpoints are silent. Their peak meters are read twice, 120 ms apart; both playback and
-// microphone count (a voice call with the mic live must not be cut either).
-
-/// True while any of the G435 dongle's audio endpoints (playback or microphone) carries a signal.
+// its own endpoints are silent. Shared with the Razer PS dongle (see src/audio.rs).
 fn audio_busy() -> bool {
-    // Meters need COM. Poll threads are in the MTA; CoInitializeEx keeps this correct on any
-    // thread (S_FALSE for an apartment already up still balances one CoUninitialize).
-    unsafe {
-        let com = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED).is_ok();
-        let busy = audio_busy_com();
-        if com {
-            windows::Win32::System::Com::CoUninitialize();
-        }
-        busy
-    }
+    !crate::audio::silent("g435")
 }
-
-unsafe fn audio_busy_com() -> bool {
-    use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
-    use windows::Win32::Media::Audio::{DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eRender};
-    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-    unsafe {
-        // When meters cannot be read at all, treat the device as busy: never cut audio unchecked.
-        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else {
-            dbg("gate: no device enumerator");
-            return true;
-        };
-        for flow in [eRender, eCapture] {
-            let Ok(coll) = en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) else {
-                dbg("gate: no endpoints");
-                return true;
-            };
-            let Ok(n) = coll.GetCount() else { continue };
-            for i in 0..n {
-                let Ok(dev) = coll.Item(i) else { continue };
-                if !is_g435_endpoint(&dev) {
-                    continue;
-                }
-                let Ok(meter) = dev.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) else {
-                    dbg("gate: no meter");
-                    return true;
-                };
-                let Ok(a) = meter.GetPeakValue() else {
-                    dbg("gate: meter unreadable");
-                    return true;
-                };
-                crate::util::sleep_ms(120);
-                let Ok(b) = meter.GetPeakValue() else {
-                    dbg("gate: meter unreadable");
-                    return true;
-                };
-                if a > 0.004 || b > 0.004 {
-                    dbg("gate: audio flowing, deferring the read");
-                    return true;
-                }
-            }
-        }
-        false
-    }
-}
-
-/// Endpoint id -> its FriendlyName names the G435. Names are read once per endpoint per run.
-static IS_G435: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-
-unsafe fn is_g435_endpoint(dev: &windows::Win32::Media::Audio::IMMDevice) -> bool {
-    unsafe {
-        let Ok(pw) = dev.GetId() else { return false };
-        let id = pw.to_string().unwrap_or_default();
-        windows::Win32::System::Com::CoTaskMemFree(Some(pw.0 as *const core::ffi::c_void));
-        let map = IS_G435.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(known) = map.get(&id) {
-            return *known;
-        }
-        let is = endpoint_friendly_name(dev).to_lowercase().contains("g435");
-        map.insert(id, is);
-        is
-    }
-}
-
-/// The device part of the endpoint FriendlyName is the USB product string ("G435 Wireless Gaming
-/// Headset"); only the prefix before it is localized - matching "g435" is locale-proof.
-unsafe fn endpoint_friendly_name(dev: &windows::Win32::Media::Audio::IMMDevice) -> String {
-    use windows::Win32::System::Com::STGM_READ;
-    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
-    use windows::Win32::System::Variant::VT_LPWSTR;
-    unsafe {
-        let Ok(store) = dev.OpenPropertyStore(STGM_READ) else { return String::new() };
-        let Ok(mut pv) = store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME) else { return String::new() };
-        let name = if pv.Anonymous.Anonymous.vt == VT_LPWSTR {
-            windows::core::PCWSTR::from_raw(pv.Anonymous.Anonymous.Anonymous.pwszVal.0).to_string().unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let _ = PropVariantClear(&mut pv);
-        name
-    }
-}
-
-/// PKEY_Device_FriendlyName (a45c254e-df1c-4efd-8020-67d146a850e0, pid 14).
-const PKEY_DEVICE_FRIENDLY_NAME: windows::Win32::Foundation::PROPERTYKEY =
-    windows::Win32::Foundation::PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14 };
 
 // ---- poll for the older dongle -------------------------------------------------------------
 

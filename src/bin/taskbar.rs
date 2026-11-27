@@ -72,7 +72,16 @@ const TIMER_GLIDE: usize = 25;
 const TIMER_LEFT_PROBE: usize = 26;
 /// Frames of the charging animation (green light passing over charging devices).
 const TIMER_CHARGE: usize = 27;
+const TIMER_BADGE: usize = 28;
+/// Frames of the ring's charging plug / unplug animation.
+const TIMER_RING_CHARGE: usize = 29;
 const CHARGE_FRAME_MS: u32 = 40;
+/// Length of the show / hide animation of the connection badges.
+const BADGE_MS: f32 = 220.0;
+/// How long the top of the ring moves aside for the charging bolt (and back on unplug).
+const RING_CHARGE_MS: f32 = 1000.0;
+/// Fraction of the ring removed at the top while it is on power.
+const RING_GAP: f32 = 0.2;
 /// One pass of the charging animation over a device.
 const CHARGE_SWEEP_MS: f32 = 1800.0;
 const LEFT_PROBES: u8 = 4;
@@ -169,8 +178,29 @@ const BLUR_MAX: f32 = 6.0;
 const AUTO_UPDATE_DELAY_MS: u32 = 2_000;
 const AUTO_UPDATE_RETRY_MS: u32 = 15_000;
 const AUTO_UPDATE_RETRIES: u32 = 8;
-/// The right-click menu is open: the strip shows no hover card meanwhile.
+/// The right-click menu is open or being built: the strip shows no hover card, and — more
+/// importantly — must not pop out, hide or move while it owns the menu. A transient "no room"
+/// answer used to hide the owner, which dismissed the menu and left the widget seemingly dead
+/// until the next placement tick put it back.
 static MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Guards `MENU_OPEN` for the whole life of one menu: ignores a second right-click while a menu is
+/// already up (nested menus also confused the owner-drawn menu style) and always clears the flag,
+/// even if opening the menu returns early.
+struct MenuGuard;
+
+impl MenuGuard {
+    fn enter() -> Option<Self> {
+        (!MENU_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(Self)
+    }
+}
+
+impl Drop for MenuGuard {
+    fn drop(&mut self) {
+        MENU_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 static AUTO_UPDATE_TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// How often receivers whose device is off or asleep are checked again.
 const QUICK_MS: u32 = 10_000;
@@ -180,6 +210,8 @@ const DBT_DEVICEARRIVAL: usize = 0x8000;
 const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
 /// Seconds the strip may be impossible to place before falling back to notification-area icons.
 const FALLBACK_AFTER_TICKS: u32 = 3;
+/// A tray-icon change lasting one tick must not notify or switch modes (#609).
+const CROWDED_CONFIRM_TICKS: u32 = 3;
 const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 const PBT_APMSUSPEND: usize = 0x0004;
 /// Battery refresh intervals offered in the menu, in minutes.
@@ -229,6 +261,8 @@ const ID_LOCK_ORDER: usize = 213;
 /// "Charging animation" and "Ring style".
 const ID_CHARGE_ANIM: usize = 214;
 const ID_RING: usize = 215;
+/// "Show connection icons": a small dongle / Bluetooth / Wi-Fi badge next to each device.
+const ID_CONNECTION_ICONS: usize = 216;
 
 /// Widget positions (registry WidgetLeft): next to the clock, at the left end, right after the
 /// taskbar icons, right before them (centred icons), or where it was put with the mouse.
@@ -386,16 +420,23 @@ struct App {
     charge_t0: ChargeClock,
     /// "Ring style": each device as its icon inside a ring filled to its level.
     ring: bool,
+    /// Ring charging transitions: when power was plugged / unplugged and which way it went.
+    ring_charge: HashMap<String, (Instant, bool)>,
+    /// Show a small connection badge (dongle, Bluetooth, Wi-Fi, cable) next to each device.
+    connection_icons: bool,
+    /// Toggling the badges: when it started and whether they are appearing (else disappearing).
+    badge_at: Option<(Instant, bool)>,
     /// "Change position" running: (strip, where the mouse holds it, its layout before).
     moving: Option<(HWND, i32, Layout)>,
     /// Strip the right-click menu was opened on (its widget's settings are the ones changed).
     menu_on: HWND,
     /// Copies that lost their room during placement: they pop out (place_mirror_at).
     pop_out: RefCell<Vec<HWND>>,
-    /// Taskbars without room for the widget, and when each was last said (one notification per
-    /// monitor, at most every 10 minutes).
-    short_bars: HashSet<isize>,
+    /// When each taskbar without room was last said (one notification per monitor, at most every
+    /// 10 minutes).
     short_said: HashMap<isize, Instant>,
+    /// Consecutive ticks each taskbar has been short, before saying so (#609).
+    short_ticks: HashMap<isize, u32>,
     last_place: (RECT, RECT, i32),
     /// Main strip uses a topmost popup owned by `Shell_TrayWnd` (e.g. when Start11's SDTaskbar
     /// sits inside `Shell_TrayWnd` and fights child-window Z-order).
@@ -432,6 +473,10 @@ struct App {
     /// Since when the mouse is on neither the strip nor the card: the card closes shortly after,
     /// so the mouse can move from the strip onto it.
     card_away: Option<Instant>,
+    /// A card opened by a click stays until another click or the menu (#439): (device, strip).
+    card_pinned: Option<(usize, HWND)>,
+    /// The left button moved far enough to be a drag, not a click.
+    drag_moved: bool,
     /// Fonts of the strip and the card for the current DPI scale.
     fonts: Option<Fonts>,
     history: batteryhub::history::History,
@@ -477,6 +522,8 @@ struct App {
     rooms: RefCell<HashMap<isize, bool>>,
     /// No taskbar the widget is shown on has room: the levels are notification-area icons.
     crowded: bool,
+    /// Consecutive ticks with the opposite room answer, before switching modes (#609).
+    crowded_ticks: u32,
     /// Devices whose last reading dropped to 0 % at once, not yet confirmed (see doubt_zero).
     zero_once: HashSet<String>,
     /// Phones with "Rising level means charging": (last level, charging as worked out, when the
@@ -513,6 +560,8 @@ struct App {
     updated_from: Option<String>,
     /// Names chosen with "Rename device" (device key -> name).
     names: std::collections::HashMap<String, String>,
+    /// Connections joined into one device (#644): secondary key -> key that keeps the readings.
+    merged: std::collections::HashMap<String, String>,
     /// Keys of the devices with "Show on the taskbar" turned off.
     hidden: HashSet<String>,
     /// "Warn at 5%" state per device.
@@ -815,6 +864,37 @@ impl Canvas {
         }
     }
 
+    /// Draws a user's full-colour icon: premultiplied ARGB pixels, source-over with `alpha`.
+    fn draw_rgba(&mut self, px: &[u32], w: i32, x: i32, y: i32, alpha: u32) {
+        if w <= 0 || alpha == 0 {
+            return;
+        }
+        let h = (px.len() / w as usize) as i32;
+        for yy in 0..h {
+            for xx in 0..w {
+                let s = px[(yy * w + xx) as usize];
+                let sa = ((s >> 24) & 0xFF) * alpha / 255;
+                if sa == 0 {
+                    continue;
+                }
+                let (dx, dy) = (x + xx, y + yy);
+                if dx < 0 || dy < 0 || dx >= self.w || dy >= self.h {
+                    continue;
+                }
+                let d = &mut self.px[(dy * self.w + dx) as usize];
+                let inv = 255 - sa;
+                let ch = |shift: u32| ((s >> shift) & 0xFF) as u32 * alpha / 255;
+                let (r, g, b) = (
+                    ch(16) + ((*d >> 16) & 0xFF) * inv / 255,
+                    ch(8) + ((*d >> 8) & 0xFF) * inv / 255,
+                    ch(0) + (*d & 0xFF) * inv / 255,
+                );
+                let na = sa + ((*d >> 24) & 0xFF) * inv / 255;
+                *d = na << 24 | r << 16 | g << 8 | b;
+            }
+        }
+    }
+
     fn blend(&mut self, x: i32, y: i32, c: COLORREF, a: u32) {
         if x < 0 || y < 0 || x >= self.w || y >= self.h || a == 0 {
             return;
@@ -1038,6 +1118,45 @@ fn scale_mask(m: &Mask, k: f32) -> Mask {
     Mask { w, h, a }
 }
 
+/// A solid lightning bolt. The font glyph is only an outline and all but disappears at the size
+/// of a taskbar badge, so the shape is drawn from a polygon instead (3x3 subsamples per pixel).
+fn bolt_mask(size: i32) -> Mask {
+    let n = size.max(1);
+    let pts: [(f32, f32); 7] = [(0.58, 0.0), (0.08, 0.56), (0.44, 0.56), (0.22, 1.0), (0.96, 0.40), (0.58, 0.40), (0.82, 0.0)];
+    let inside = |px: f32, py: f32| {
+        let mut hit = false;
+        let mut j = pts.len() - 1;
+        for i in 0..pts.len() {
+            let ((xi, yi), (xj, yj)) = (pts[i], pts[j]);
+            if (yi > py) != (yj > py) {
+                let at = (xj - xi) * (py - yi) / (yj - yi) + xi;
+                if px < at {
+                    hit = !hit;
+                }
+            }
+            j = i;
+        }
+        hit
+    };
+    let mut a = vec![0u8; (n * n) as usize];
+    for y in 0..n {
+        for x in 0..n {
+            let mut hits = 0u32;
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let px = (x as f32 + (sx as f32 + 0.5) / 3.0) / n as f32;
+                    let py = (y as f32 + (sy as f32 + 0.5) / 3.0) / n as f32;
+                    if inside(px, py) {
+                        hits += 1;
+                    }
+                }
+            }
+            a[(y * n + x) as usize] = (hits * 255 / 9) as u8;
+        }
+    }
+    Mask { w: n, h: n, a }
+}
+
 /// Draws a piece of an item popping in (`p` 0 to 1) or out (1 to 0): it grows from half its size
 /// around the item's centre `c` with a small overshoot, fades in, and is blurred while it moves
 /// (strongest at the start), like the strip's other motion.
@@ -1088,7 +1207,156 @@ fn blur_mask(m: &Mask, r: i32, horizontal: bool) -> Mask {
     Mask { w, h, a: a.into_iter().map(|v| v.min(255) as u8).collect() }
 }
 
-/// The icon of a device on the strip and the card: its glyph, or the drawn earbuds.
+/// Segoe Fluent Icons glyphs used for the small connection icons (E702 is the Bluetooth logo;
+/// E71E would show a magnifying glass).
+const GLYPH_WIFI: char = '\u{E701}';
+const GLYPH_BLUETOOTH: char = '\u{E702}';
+const GLYPH_USB: char = '\u{E88E}';
+const GLYPH_HID: char = '\u{E772}';
+
+/// Which single icon stands for the link. LIGHTSPEED is a Logitech transport rather than a Windows
+/// connection: it gets the Wi-Fi icon with a small bolt on it. Cable and Bluetooth still win when
+/// that is how the device is actually read.
+fn connection_badge(via: &str, name: &str, vid: Option<u16>) -> Option<(char, bool)> {
+    let v = via.to_ascii_lowercase();
+    let n = name.to_ascii_lowercase();
+    let icon = if v.contains("bluetooth") {
+        (GLYPH_BLUETOOTH, false)
+    } else if v.contains("wi-fi") || v.contains("wifi") {
+        (GLYPH_WIFI, false)
+    } else if v.contains("usb") {
+        (GLYPH_USB, false)
+    } else if v.contains("hid") {
+        (GLYPH_HID, false)
+    } else if n.contains("lightspeed") || v.contains("logitech") || vid == Some(0x046D) {
+        (GLYPH_WIFI, true)
+    } else if v.contains("2.4") {
+        (GLYPH_WIFI, false)
+    } else {
+        return None;
+    };
+    Some(icon)
+}
+
+/// One grey for every connection: the badge is a hint, not a second colour code.
+const BADGE_GRAY: COLORREF = rgb(150, 150, 150);
+
+/// `top` over `base` at `(x, y)`, taking the stronger alpha of the two.
+fn overlay_mask(base: &Mask, top: &Mask, x: i32, y: i32) -> Mask {
+    let mut a = base.a.clone();
+    for yy in 0..top.h {
+        for xx in 0..top.w {
+            let (tx, ty) = (x + xx, y + yy);
+            if tx < 0 || ty < 0 || tx >= base.w || ty >= base.h {
+                continue;
+            }
+            let i = (ty * base.w + tx) as usize;
+            a[i] = a[i].max(top.a[(yy * top.w + xx) as usize]);
+        }
+    }
+    Mask { w: base.w, h: base.h, a }
+}
+
+/// The icon after the level: one grey glyph, no text, no plate or background.
+fn badge_piece(dev: Option<usize>, via: &str, name: &str, vid: Option<u16>, icon_font: HFONT, light: bool, alpha: u32, gap_after: i32) -> Option<Piece> {
+    let (glyph, bolt) = connection_badge(via, name, vid)?;
+    let mut m = mask(&glyph.to_string(), icon_font, light);
+    if bolt {
+        // Dim the Wi-Fi arcs so the solid bolt is unmistakably the foreground mark.
+        for a in &mut m.a {
+            *a = (*a as f32 * 0.45).round() as u8;
+        }
+        let b = bolt_mask((m.h as f32 * 0.95).round() as i32);
+        m = overlay_mask(&m, &b, (m.w - b.w) / 2, (m.h - b.h) / 2);
+    }
+    if m.a.iter().all(|&a| a == 0) {
+        return None;
+    }
+    let mut p = Piece::new(dev, m, BADGE_GRAY, alpha * 190 / 255, gap_after);
+    p.glow = false;
+    Some(p)
+}
+
+/// Opacity / pop of a badge `ms` after the toggle: eased, and mirrored when hiding.
+fn badge_progress(ms: f32, showing: bool) -> f32 {
+    let p = (ms / BADGE_MS).clamp(0.0, 1.0);
+    let eased = p * p * (3.0 - 2.0 * p);
+    if showing { eased } else { 1.0 - eased }
+}
+
+/// A device's own ICO / PNG on the strip (#476), in place of the built-in glyph.
+fn custom_piece(dev: Option<usize>, key: &str, max: i32, alpha: u32, gap_after: i32) -> Option<Piece> {
+    let path = settings::icon_file(SETTINGS_KEY, key)?;
+    let sprite = batteryhub::custom_icon::load(&path, max.max(1) as u32)?;
+    let m = Mask { w: sprite.w, h: sprite.h, a: vec![255; (sprite.w * sprite.h) as usize] };
+    let mut p = Piece::new(dev, m, COLORREF(0), alpha, gap_after);
+    p.rgba = Some(sprite.px);
+    Some(p)
+}
+
+/// Premultiplied ARGB pixels of a tinted mask, for composing a custom icon into a ring (#476).
+fn rgba_mask(m: &Mask, color: COLORREF, alpha: u32) -> Vec<u32> {
+    let (r, g, b) = ((color.0 & 0xFF) as u32, ((color.0 >> 8) & 0xFF) as u32, ((color.0 >> 16) & 0xFF) as u32);
+    m.a.iter()
+        .map(|&a| {
+            let a = a as u32 * alpha / 255;
+            a << 24 | (r * a / 255) << 16 | (g * a / 255) << 8 | b * a / 255
+        })
+        .collect()
+}
+
+/// Source-over of premultiplied ARGB pixels at `(x, y)` into a `w`-wide canvas.
+fn overlay_rgba(base: &mut [u32], w: i32, src: &[u32], sw: i32, x: i32, y: i32, alpha: u32) {
+    if sw <= 0 || alpha == 0 {
+        return;
+    }
+    let sh = (src.len() / sw as usize) as i32;
+    for yy in 0..sh {
+        for xx in 0..sw {
+            let s = src[(yy * sw + xx) as usize];
+            let sa = ((s >> 24) & 0xFF) * alpha / 255;
+            if sa == 0 {
+                continue;
+            }
+            let (dx, dy) = (x + xx, y + yy);
+            if dx < 0 || dy < 0 || dx >= w || dy * w + dx >= base.len() as i32 {
+                continue;
+            }
+            let d = &mut base[(dy * w + dx) as usize];
+            let inv = 255 - sa;
+            let ch = |shift: u32| (s >> shift) & 0xFF;
+            let (r, g, b) = (
+                ch(16) + ((*d >> 16) & 0xFF) * inv / 255,
+                ch(8) + ((*d >> 8) & 0xFF) * inv / 255,
+                ch(0) + (*d & 0xFF) * inv / 255,
+            );
+            let na = sa + ((*d >> 24) & 0xFF) * inv / 255;
+            *d = na << 24 | r << 16 | g << 8 | b;
+        }
+    }
+}
+
+/// A user's icon inside the battery ring (#476), composed into one full-colour piece.
+fn custom_ring_piece(dev: Option<usize>, key: &str, d: i32, thick: f32, frac: f32, gap: f32, base_mul: f32, bolt_open: f32, base_color: COLORREF, arc_color: COLORREF, alpha: u32, gap_after: i32) -> Option<Piece> {
+    let path = settings::icon_file(SETTINGS_KEY, key)?;
+    let sprite = batteryhub::custom_icon::load(&path, (d / 2).max(1) as u32)?;
+    let center = Mask { w: sprite.w, h: sprite.h, a: vec![255; (sprite.w * sprite.h) as usize] };
+    let (base, mut arc) = ring_masks_with(&center, d, thick, frac, gap, base_mul);
+    if bolt_open > 0.0 {
+        let bolt = ring_bolt_mask(&center, d, thick, gap, bolt_open);
+        for (v, a) in arc.a.iter_mut().zip(&bolt.a) {
+            *v = (*v).max(*a);
+        }
+    }
+    let mut px = rgba_mask(&base, base_color, alpha);
+    overlay_rgba(&mut px, d, &rgba_mask(&arc, arc_color, alpha), d, 0, 0, 255);
+    overlay_rgba(&mut px, d, &sprite.px, sprite.w, (d - sprite.w) / 2, (d - sprite.h) / 2, alpha);
+    let m = Mask { w: d, h: d, a: vec![255; (d * d) as usize] };
+    let mut p = Piece::new(dev, m, COLORREF(0), alpha, gap_after);
+    p.rgba = Some(px);
+    Some(p)
+}
+
 fn device_icon(d: &DeviceStatus, font: HFONT, light: bool) -> Mask {
     if d.kind != DeviceKind::Earbuds {
         return mask(&d.kind.glyph().to_string(), font, light);
@@ -1124,11 +1392,13 @@ struct Piece {
     second: Option<(Mask, COLORREF)>,
     /// Drawn with a soft glow in its colour ("Glowing icon").
     glow: bool,
+    /// A user-chosen full-colour icon instead of a tinted mask (#476).
+    rgba: Option<Vec<u32>>,
 }
 
 impl Piece {
     fn new(dev: Option<usize>, m: Mask, color: COLORREF, alpha: u32, gap_after: i32) -> Self {
-        Piece { dev, m, color, alpha, gap_after, second: None, glow: false }
+        Piece { dev, m, color, alpha, gap_after, second: None, glow: false, rgba: None }
     }
 
     /// The piece's masks with their colours.
@@ -1142,18 +1412,21 @@ impl Piece {
             return Piece::new(dev, m, colors.0, alpha, gap_after);
         }
         let (a, b) = split_mask(&m, at, rows);
-        Piece { dev, m: a, color: colors.0, alpha, gap_after, second: Some((b, colors.1)), glow: false }
+        Piece { dev, m: a, color: colors.0, alpha, gap_after, second: Some((b, colors.1)), glow: false, rgba: None }
     }
 }
 
 /// Ring style: a `d` square with the ring (only the part above `percent`, faint) and `icon` in its
 /// middle, and a second with the ring's part filled clockwise from the top up to `percent`.
+#[cfg(test)]
 fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
-    let n = (d * d).max(0) as usize;
-    let (mut base, mut arc) = (vec![0u8; n], vec![0u8; n]);
-    // The icon stays on whole pixels (sharp), placed by its ink (glyphs sit off-centre in their
-    // font cell); the ring, drawn from its formula, is centred on the middle of that ink to a
-    // fraction of a pixel instead.
+    ring_masks_with(icon, d, thick, percent.clamp(0, 100) as f32 / 100.0, 0.0, 1.0)
+}
+
+/// The icon stays on whole pixels (placed by its ink, since glyphs sit off-centre in their font
+/// cell); the ring is centred on that same ink to a fraction of a pixel. Shared with the bolt so
+/// both land on the same centre.
+fn ring_geometry(icon: &Mask, d: i32) -> (f32, f32, i32, i32) {
     let (mut x0, mut y0, mut x1, mut y1) = (icon.w, icon.h, -1, -1);
     for yy in 0..icon.h {
         for xx in 0..icon.w {
@@ -1165,11 +1438,36 @@ fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
     let half = d as f32 / 2.0;
     let (mx, my) = if x1 >= x0 { ((x0 + x1 + 1) as f32 / 2.0, (y0 + y1 + 1) as f32 / 2.0) } else { (icon.w as f32 / 2.0, icon.h as f32 / 2.0) };
     let (ox, oy) = ((half - mx).round() as i32, (half - my).round() as i32);
-    let (cx, cy) = (ox as f32 + mx, oy as f32 + my);
+    (ox as f32 + mx, oy as f32 + my, ox, oy)
+}
+
+/// Hover=3 was the old "Card on click" choice. It is now a separate setting, so the old value
+/// simply means the ordinary hover card.
+fn hover_card_mode(mode: settings::HoverMode) -> settings::HoverMode {
+    if mode == settings::HoverMode::Click { settings::HoverMode::Card } else { mode }
+}
+
+/// Map a battery level onto the part of the circle that is still visible after the top `gap` is
+/// opened: 87% means 87% of the *remaining* ring, not 87% of the whole circle.
+fn ring_fill_fraction(level: f32, gap: f32) -> f32 {
+    let gap = gap.clamp(0.0, 0.5);
+    gap / 2.0 + level.clamp(0.0, 1.0) * (1.0 - gap)
+}
+
+/// The same ring, with `frac` of the circle filled and `gap` (a fraction of the circle, centred on
+/// the top) removed. The ends of the *filled* arc get round caps, so opening it looks like the arc
+/// is being pushed apart rather than cut off. `base_mul` fades the faint unfilled remainder out
+/// while on power, so a 30% device does not keep looking like a whole circle.
+fn ring_masks_with(icon: &Mask, d: i32, thick: f32, frac: f32, gap: f32, base_mul: f32) -> (Mask, Mask) {
+    let n = (d * d).max(0) as usize;
+    let (mut base, mut arc) = (vec![0u8; n], vec![0u8; n]);
+    let (cx, cy, ox, oy) = ring_geometry(icon, d);
     // Every ring the same size; half a pixel of room for its centre to move.
+    let half = d as f32 / 2.0;
     let ro = half - 1.0;
     let ri = ro - thick;
-    let frac = percent.clamp(0, 100) as f32 / 100.0;
+    let frac = frac.clamp(0.0, 1.0);
+    let gap = gap.clamp(0.0, 0.5);
     for y in 0..d {
         for x in 0..d {
             let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
@@ -1183,11 +1481,34 @@ fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
             if turn < 0.0 {
                 turn += 1.0;
             }
+            if gap > 0.0 && (turn < gap / 2.0 || turn > 1.0 - gap / 2.0) {
+                continue; // the top segment moves aside
+            }
             let i = (y * d + x) as usize;
             if turn <= frac && frac > 0.0 {
                 arc[i] = (cover * 255.0) as u8;
             } else {
-                base[i] = (cover * 255.0 * 0.28) as u8;
+                base[i] = (cover * 255.0 * 0.28 * base_mul.clamp(0.0, 1.0)) as u8;
+            }
+        }
+    }
+    if gap > 0.0 && frac > gap / 2.0 {
+        // Round caps only where the filled arc actually begins and ends. A cap at the left end of
+        // the gap would put bright pixels on the unfilled side of a 30% ring.
+        let (rm, cap) = ((ro + ri) / 2.0, (thick / 2.0).max(0.5));
+        let last = frac.min(1.0 - gap / 2.0);
+        for turn in [gap / 2.0, last] {
+            let a = turn * std::f32::consts::TAU;
+            let (ex, ey) = (cx + a.sin() * rm, cy - a.cos() * rm);
+            for y in 0..d {
+                for x in 0..d {
+                    let dist = ((x as f32 + 0.5 - ex).powi(2) + (y as f32 + 0.5 - ey).powi(2)).sqrt();
+                    let cover = (cap - dist + 0.5).clamp(0.0, 1.0);
+                    if cover > 0.0 {
+                        let i = (y * d + x) as usize;
+                        arc[i] = arc[i].max((cover * 255.0) as u8);
+                    }
+                }
             }
         }
     }
@@ -1201,6 +1522,50 @@ fn ring_masks(icon: &Mask, d: i32, thick: f32, percent: i32) -> (Mask, Mask) {
         }
     }
     (Mask { w: d, h: d, a: base }, Mask { w: d, h: d, a: arc })
+}
+
+/// The solid charging bolt in the gap at the top of a ring. It uses the ring's own centre and the
+/// same angle as the removed arc, so it lands exactly in the opening; `open` fades it in / out.
+fn ring_bolt_mask(icon: &Mask, d: i32, thick: f32, gap: f32, open: f32) -> Mask {
+    let size = ((d as f32 * 0.30).round() as i32).max(5);
+    let drawn = bolt_mask(size);
+    // The bolt is slanted, so its font-free polygon is not centred in its cell. Crop to the ink
+    // and centre *that*, otherwise it looks shifted to one side of the gap.
+    let (mut bx0, mut by0, mut bx1, mut by1) = (size, size, -1, -1);
+    for y in 0..size {
+        for x in 0..size {
+            if drawn.a[(y * size + x) as usize] > 8 {
+                (bx0, by0, bx1, by1) = (bx0.min(x), by0.min(y), bx1.max(x), by1.max(y));
+            }
+        }
+    }
+    let raw = if bx1 >= bx0 {
+        let (w, h) = (bx1 - bx0 + 1, by1 - by0 + 1);
+        let mut a = Vec::with_capacity((w * h) as usize);
+        for y in by0..=by1 {
+            a.extend_from_slice(&drawn.a[(y * size + bx0) as usize..=(y * size + bx1) as usize]);
+        }
+        Mask { w, h, a }
+    } else {
+        return Mask { w: d, h: d, a: vec![0; (d * d).max(0) as usize] };
+    };
+    let mut a = vec![0u8; (d * d).max(0) as usize];
+    let (cx, cy, _, _) = ring_geometry(icon, d);
+    let rm = (d as f32 / 2.0 - 1.0) - thick / 2.0;
+    // Middle of the removed segment, then centre the bolt's ink there on x and y.
+    let gy = cy - rm * (gap * std::f32::consts::PI).cos() - (d as f32 * 0.07).round();
+    let x0 = (cx - raw.w as f32 / 2.0).round() as i32;
+    let y0 = (gy - raw.h as f32 / 2.0).round().clamp(0.0, (d - raw.h) as f32) as i32;
+    for yy in 0..raw.h {
+        for xx in 0..raw.w {
+            let (tx, ty) = (x0 + xx, y0 + yy);
+            if tx < 0 || ty < 0 || tx >= d || ty >= d {
+                continue;
+            }
+            a[(ty * d + tx) as usize] = (raw.a[(yy * raw.w + xx) as usize] as f32 * open).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Mask { w: d, h: d, a }
 }
 
 /// The soft glow around a piece ("Glowing icon"): `m` blurred both ways by `r` and made brighter.
@@ -1263,6 +1628,8 @@ struct Fonts {
     icons: HFONT,
     bolt: HFONT,
     text: HFONT,
+    badge: HFONT,
+    badge_icon: HFONT,
     card_icon: HFONT,
     card_name: HFONT,
     card_big: HFONT,
@@ -1277,6 +1644,8 @@ impl Fonts {
             icons: make_font(px(16.0), 400, "Segoe Fluent Icons", "Segoe MDL2 Assets", 0),
             bolt: make_font(px(11.0), 400, "Segoe Fluent Icons", "Segoe MDL2 Assets", 0),
             text: make_font(px(13.0), 400, "Segoe UI Variable Text", "Segoe UI", px(12.0)),
+            badge: make_font(px(9.0), 600, "Segoe UI Variable Text", "Segoe UI", px(8.0)),
+            badge_icon: make_font(px(10.0), 400, "Segoe Fluent Icons", "Segoe MDL2 Assets", 0),
             card_icon: make_font(px(16.0), 400, "Segoe Fluent Icons", "Segoe MDL2 Assets", 0),
             card_name: make_font(px(15.0), 600, "Segoe UI Variable Text", "Segoe UI", 0),
             card_big: make_font(px(30.0), 600, "Segoe UI Variable Display", "Segoe UI", 0),
@@ -1287,7 +1656,7 @@ impl Fonts {
 
 impl Drop for Fonts {
     fn drop(&mut self) {
-        for f in [self.icons, self.bolt, self.text, self.card_icon, self.card_name, self.card_big, self.card_small] {
+        for f in [self.icons, self.bolt, self.text, self.badge, self.badge_icon, self.card_icon, self.card_name, self.card_big, self.card_small] {
             unsafe {
                 let _ = DeleteObject(HGDIOBJ(f.0));
             }
@@ -1326,6 +1695,9 @@ impl App {
 
     /// Renders the strip and hands it to the layered window.
     fn paint(&mut self) {
+        if self.badge_at.is_some_and(|(at, _)| at.elapsed().as_secs_f32() * 1000.0 >= BADGE_MS) {
+            self.badge_at = None;
+        }
         if self.crowded && !self.fallback {
             self.sync_tray();
         }
@@ -1392,7 +1764,10 @@ impl App {
         }
         self.sync_slide_timer();
         self.sync_charge_timer();
-        let animating = self.drag.is_some() || self.sliding() || !self.presence.is_empty() || self.y_glide.is_some() || self.charging_shown();
+        self.prune_ring_charge();
+        self.sync_ring_charge_timer();
+        self.sync_badge_timer();
+        let animating = self.drag.is_some() || self.sliding() || !self.presence.is_empty() || self.y_glide.is_some() || self.charging_shown() || self.ring_charge_animating() || self.badge_at.is_some();
         if resized || !animating {
             self.last_place.2 = -1; // force a reposition with the new width
             self.place();
@@ -1419,11 +1794,12 @@ impl App {
         Target { s, vertical, extent: if vertical { w } else { h }, shift_y: self.shown_offset_y() }
     }
 
-    /// The fonts of the strip (icons, bolt, text) for DPI scale `s`.
-    fn strip_fonts(&mut self, s: f32) -> (HFONT, HFONT, HFONT) {
+    /// The fonts of the strip (icons, bolt, text, connection icon) for DPI scale `s`.
+    fn strip_fonts(&mut self, s: f32) -> (HFONT, HFONT, HFONT, HFONT) {
+        let all = |f: &Fonts| (f.icons, f.bolt, f.text, f.badge_icon);
         if s == self.scale() {
             self.ensure_fonts();
-            return self.fonts.as_ref().map(|f| (f.icons, f.bolt, f.text)).unwrap_or_default();
+            return self.fonts.as_ref().map(all).unwrap_or_default();
         }
         if !self.fonts_more.iter().any(|f| f.scale == s) {
             if self.fonts_more.len() >= 4 {
@@ -1431,7 +1807,7 @@ impl App {
             }
             self.fonts_more.push(Fonts::new(s));
         }
-        self.fonts_more.iter().find(|f| f.scale == s).map(|f| (f.icons, f.bolt, f.text)).unwrap_or_default()
+        self.fonts_more.iter().find(|f| f.scale == s).map(all).unwrap_or_default()
     }
 
     /// Icon font of the ring style for DPI scale `s` (kept per scale).
@@ -1451,7 +1827,16 @@ impl App {
         // Same colours, fonts and spacing as the original C++ widget.
         let fg = if light { rgb(0, 0, 0) } else { rgb(255, 255, 255) };
         let red = ui::low_color(light);
-        let (icons, bolt, text) = self.strip_fonts(s);
+        let (icons, bolt, text, badge_icon_font) = self.strip_fonts(s);
+        // The drops are drawn for a short while after the menu toggle even when they are being
+        // turned off, so they fade out instead of vanishing in one frame. A fade never scales or
+        // blurs the tiny mark (which made it disappear in earlier builds).
+        let badge_step = self.badge_at.map(|(at, showing)| badge_progress(at.elapsed().as_secs_f32() * 1000.0, showing));
+        let badge_fade = if self.connection_icons {
+            badge_step.unwrap_or(1.0)
+        } else {
+            badge_step.unwrap_or(0.0)
+        };
         // Ring style: the icon a size between the strip's icons and the bolt, to fit inside the ring.
         let ring_font = if self.ring { self.ring_font(s) } else { bolt };
         let mut pieces: Vec<Piece> = Vec::new();
@@ -1482,28 +1867,67 @@ impl App {
             let mark = bolt_color.is_some();
             let glow = settings::glow(SETTINGS_KEY, &d.key);
             if self.ring && d.percent >= 0 {
-                // Ring style: the icon inside a ring filled clockwise to the level, green while
-                // charging, blue when full, red when low, else in the icon's colour.
-                let ring_color = bolt_color.unwrap_or(if low { red } else { own });
-                let (base, arc) = ring_masks(&device_icon(d, ring_font, light), px(28.0), (2.5 * s).max(2.0), d.percent);
-                let mut p = Piece::new(Some(i), base, icon_tint(low), alpha, 0);
-                p.second = Some((arc, ring_color));
-                p.glow = glow;
+                // Ring style: the icon inside a ring filled clockwise to the level. On power the
+                // top segment moves aside (with round ends), the unfilled remainder fades away and
+                // a green bolt takes the gap; unplugging plays the same animation backwards.
+                let on_power = d.is_charging() || d.is_full();
+                let (open, fill, animating) = self.ring_charge_state(&d.key, on_power, d.percent, Instant::now());
+                if !animating {
+                    self.ring_charge.remove(&d.key);
+                }
+                let green = ui::charging_color(light);
+                let ring_color = if on_power || animating { green } else { bolt_color.unwrap_or(if low { red } else { own }) };
+                let dpx = px(28.0);
+                let thick = (2.5 * s).max(2.0);
+                let gap = RING_GAP * open;
+                // Space belongs to the ring piece: the layout adds `gap_after` *after* a piece,
+                // so putting it on the last (badge) piece would never move anything.
+                let ring_gap_after = px(4.0);
+                // The gap takes part of the circle away, so the level has to be spread over what
+                // is left. Otherwise 87% covers 96% of the visible ring and looks full.
+                let draw_frac = ring_fill_fraction(fill, gap);
+                let icon = device_icon(d, ring_font, light);
+                let p = custom_ring_piece(Some(i), &d.key, dpx, thick, draw_frac, gap, 1.0, open, icon_tint(low), ring_color, alpha, ring_gap_after)
+                    .unwrap_or_else(|| {
+                        let (base, mut arc) = ring_masks_with(&icon, dpx, thick, draw_frac, gap, 1.0);
+                        if open > 0.0 {
+                            let bolt = ring_bolt_mask(&icon, dpx, thick, gap, open);
+                            for (v, a) in arc.a.iter_mut().zip(&bolt.a) {
+                                *v = (*v).max(*a);
+                            }
+                        }
+                        let mut p = Piece::new(Some(i), base, icon_tint(low), alpha, ring_gap_after);
+                        p.second = Some((arc, ring_color));
+                        p.glow = glow;
+                        p
+                    });
                 pieces.push(p);
+                if badge_fade > 0.0 {
+                    let a = (alpha as f32 * badge_fade).round() as u32;
+                    if let Some(b) = badge_piece(Some(i), &d.via, &d.name, d.hw.map(|h| h.0), badge_icon_font, light, a, 0) {
+                        pieces.push(b);
+                    }
+                }
                 continue;
             }
-            let icon = device_icon(d, icons, light);
-            let mut icon_piece = match buds_low {
-                // Each bud of the drawn earbuds in its own colour (left bud in the left half).
-                Some((l, r)) if d.kind == DeviceKind::Earbuds => {
-                    let half = icon.w / 2;
-                    Piece::split(Some(i), icon, half, false, (icon_tint(l), icon_tint(r)), alpha, px(5.0))
+            let mut icon_piece = match custom_piece(Some(i), &d.key, px(24.0), alpha, px(5.0)) {
+                Some(p) => p,
+                None => {
+                    let icon = device_icon(d, icons, light);
+                    match buds_low {
+                        // Each bud of the drawn earbuds in its own colour (left bud in the left half).
+                        Some((l, r)) if d.kind == DeviceKind::Earbuds => {
+                            let half = icon.w / 2;
+                            Piece::split(Some(i), icon, half, false, (icon_tint(l), icon_tint(r)), alpha, px(5.0))
+                        }
+                        _ => Piece::new(Some(i), icon, icon_tint(low), alpha, px(5.0)),
+                    }
                 }
-                _ => Piece::new(Some(i), icon, icon_tint(low), alpha, px(5.0)),
             };
             icon_piece.glow = glow;
             pieces.push(icon_piece);
-            let gap = if mark { px(2.0) } else { 0 };
+            // The level is followed immediately by the connection label, then the bolt.
+            let gap = if mark || badge_fade > 0.0 { px(2.0) } else { 0 };
             let both = d.buds.filter(|b| d.percent >= 0 && b.left >= 0 && b.right >= 0);
             let piece = match both {
                 // Earbuds with both buds out: each bud's own level, each red on its own. On a
@@ -1532,8 +1956,14 @@ impl App {
                 }
             };
             pieces.push(piece);
+            if badge_fade > 0.0 {
+                let a = (alpha as f32 * badge_fade).round() as u32;
+                if let Some(b) = badge_piece(Some(i), &d.via, &d.name, d.hw.map(|h| h.0), badge_icon_font, light, a, px(2.0)) {
+                    pieces.push(b);
+                }
+            }
             if let Some(c) = bolt_color {
-                pieces.push(Piece::new(Some(i), mask("\u{E945}", bolt, light), c, alpha, 0));
+                pieces.push(Piece::new(Some(i), mask("\u{E945}", bolt, light), c, alpha, if badge_fade > 0.0 { px(2.0) } else { 0 }));
             }
         }
         pieces
@@ -1591,7 +2021,9 @@ impl App {
                 let row_start = icon.m.w + icon.gap_after;
                 let row_w = cx - row_start;
                 let row_h = pieces[first + 1..k].iter().map(|p| p.m.h).max().unwrap_or(0);
-                let gap = px(1.0);
+                // Compact layout puts the small pieces under the icon: keep a connection mark
+                // clear of the ring there too.
+                let gap = if self.ring { px(10.0) } else { px(1.0) };
                 let y = (h - icon.m.h - gap - row_h) / 2;
                 cx = icon.m.w.max(row_w);
                 xs[first] = start + (cx - icon.m.w) / 2;
@@ -1641,12 +2073,16 @@ impl App {
                     let r = px(3.0).max(1);
                     cv.draw(&glow_mask(&p.m, r), x + off - r, y0 - r, p.color, p.alpha * alpha / 255);
                 }
+                if let Some(rgba) = &p.rgba {
+                    cv.draw_rgba(rgba, p.m.w, x + off, y0, p.alpha * alpha / 255);
+                    continue;
+                }
                 for (m, color) in p.layers() {
                     if let Some(i) = p.dev
                         && items[i].p < 1.0
                     {
                         let c = ((ranges[i].0 + ranges[i].1) as f32 / 2.0 + off as f32, h as f32 / 2.0);
-                        draw_popping(&mut cv, m, (x + off, y0), c, items[i].p, s, color, p.alpha);
+                        draw_popping(&mut cv, m, (x + off, y0), c, items[i].p, s, color, p.alpha * alpha / 255);
                     } else if blur > 0 {
                         let b = blur_mask(m, blur, true);
                         cv.draw(&b, x + off - blur, y0, color, p.alpha * alpha / 255);
@@ -1678,6 +2114,52 @@ impl App {
             {
                 let off = moves.get(i).map_or(0, |m| m.0);
                 charge_sweep(cv, ranges[i].0 + off, ranges[i].1 + off, vertical, ui::charging_color(self.light), t);
+            }
+        }
+    }
+
+    /// TIMER_BADGE runs for one pop of the connection badges, after the menu toggle.
+    fn sync_badge_timer(&self) {
+        unsafe {
+            if self.badge_at.is_some() {
+                SetTimer(Some(self.main), TIMER_BADGE, 15, None);
+            } else {
+                let _ = KillTimer(Some(self.main), TIMER_BADGE);
+            }
+        }
+    }
+
+    /// `(open, fill, animating)` for a ring: `open` 0..1 moves the top segment aside and fades in
+    /// the bolt. `fill` is always the reported level — the gap does not turn 95% into 100%.
+    fn ring_charge_state(&self, key: &str, on_power: bool, percent: i32, now: Instant) -> (f32, f32, bool) {
+        let actual = (percent.clamp(0, 100) as f32) / 100.0;
+        match self.ring_charge.get(key) {
+            None => (if on_power { 1.0 } else { 0.0 }, actual, false),
+            Some(&(at, plugging)) => {
+                let p = (now.saturating_duration_since(at).as_secs_f32() * 1000.0 / RING_CHARGE_MS).clamp(0.0, 1.0);
+                let eased = p * p * (3.0 - 2.0 * p);
+                let open = if plugging { eased } else { 1.0 - eased };
+                (open, actual, p < 1.0)
+            }
+        }
+    }
+
+    fn prune_ring_charge(&mut self) {
+        let now = Instant::now();
+        self.ring_charge.retain(|_, (at, _)| now.saturating_duration_since(*at).as_secs_f32() * 1000.0 < RING_CHARGE_MS);
+    }
+
+    fn ring_charge_animating(&self) -> bool {
+        let now = Instant::now();
+        self.ring_charge.values().any(|&(at, _)| now.saturating_duration_since(at).as_secs_f32() * 1000.0 < RING_CHARGE_MS)
+    }
+
+    fn sync_ring_charge_timer(&self) {
+        unsafe {
+            if self.ring_charge_animating() {
+                SetTimer(Some(self.main), TIMER_RING_CHARGE, 15, None);
+            } else {
+                let _ = KillTimer(Some(self.main), TIMER_RING_CHARGE);
             }
         }
     }
@@ -1755,12 +2237,16 @@ impl App {
                     let r = px(3.0).max(1);
                     cv.draw(&glow_mask(&p.m, r), x - r, y + off - r, p.color, p.alpha * alpha / 255);
                 }
+                if let Some(rgba) = &p.rgba {
+                    cv.draw_rgba(rgba, p.m.w, x, y + off, p.alpha * alpha / 255);
+                    continue;
+                }
                 for (m, color) in p.layers() {
                     if let Some(i) = p.dev
                         && items[i].p < 1.0
                     {
                         let c = (w as f32 / 2.0, (ranges[i].0 + ranges[i].1) as f32 / 2.0 + off as f32);
-                        draw_popping(&mut cv, m, (x, y + off), c, items[i].p, s, color, p.alpha);
+                        draw_popping(&mut cv, m, (x, y + off), c, items[i].p, s, color, p.alpha * alpha / 255);
                     } else if blur > 0 {
                         cv.draw(&blur_mask(m, blur, false), x, y + off - blur, color, p.alpha * alpha / 255);
                     } else {
@@ -2060,6 +2546,10 @@ impl App {
                 } else {
                     GetParent(self.strip).is_ok_and(|p| p == self.taskbar)
                 };
+            if alive && MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+                // Don't tear down the menu's owner because of a momentary layout change.
+                return true;
+            }
             if !alive {
                 if is_our_strip(self.strip) {
                     let _ = DestroyWindow(self.strip);
@@ -2141,6 +2631,8 @@ impl App {
         self.fallback = on;
         // Recomputed by the next tick (sync_crowded) once the strip is back.
         self.crowded = false;
+        self.crowded_ticks = 0;
+        self.short_ticks.clear();
         if on {
             self.hide_tip();
             self.drop_mirrors();
@@ -2196,6 +2688,10 @@ impl App {
     /// No taskbar the widget is shown on has room beside its task buttons: the levels move to
     /// notification-area icons (said once in a notification) until one has room again.
     fn sync_crowded(&mut self) {
+        // A mode switch while the menu is up would hide the strip that owns it (#609, menu).
+        if MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let mut bars: Vec<isize> = self.mirrors.iter().map(|m| m.0.0 as isize).collect();
         if !self.primary_hidden {
             bars.push(self.taskbar.0 as isize);
@@ -2209,8 +2705,16 @@ impl App {
             let rooms = self.rooms.borrow();
             bars.iter().filter(|b| rooms.get(b) == Some(&false)).copied().collect()
         };
+        // A tray-icon change lasting a single tick used to send a notification and switch to
+        // notification-area icons, then switch straight back (#609). Require the answer to hold
+        // for a few ticks before saying it or changing modes.
+        self.short_ticks.retain(|b, _| short.contains(b));
+        let new: Vec<isize> = short.iter().filter_map(|b| {
+            let n = self.short_ticks.entry(*b).or_insert(0);
+            *n += 1;
+            (*n == CROWDED_CONFIRM_TICKS).then_some(*b)
+        }).collect();
         if !crowded {
-            let new: Vec<isize> = short.iter().filter(|b| !self.short_bars.contains(b)).copied().collect();
             for b in new {
                 if self.short_said.get(&b).is_none_or(|t| t.elapsed().as_secs() >= 600) {
                     self.short_said.insert(b, Instant::now());
@@ -2220,10 +2724,15 @@ impl App {
                 }
             }
         }
-        self.short_bars = short;
         if crowded == self.crowded {
+            self.crowded_ticks = 0;
             return;
         }
+        self.crowded_ticks += 1;
+        if self.crowded_ticks < CROWDED_CONFIRM_TICKS {
+            return;
+        }
+        self.crowded_ticks = 0;
         self.crowded = crowded;
         dbg_log(&format!("not enough room on the taskbar: {crowded}"));
         if crowded {
@@ -2243,6 +2752,10 @@ impl App {
     /// right), next to that taskbar's clock. Taskbars of other monitors exist only when Windows
     /// shows the taskbar on all displays.
     fn sync_mirrors(&mut self) {
+        // A menu opened on a copy owns that strip too: keep the copies as they are until it closes.
+        if MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         if self.fallback || self.strip.0.is_null() {
             self.drop_mirrors();
             self.mirrors_ready = true;
@@ -2439,6 +2952,9 @@ impl App {
     fn place_mirror_at(&mut self, i: usize) -> bool {
         let (bar, strip) = self.mirrors[i];
         let was = unsafe { IsWindowVisible(strip).as_bool() };
+        if was && MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            return true; // its menu is open: never pop it out now
+        }
         let pending = self.place_mirror(bar, strip);
         let out = std::mem::take(&mut *self.pop_out.borrow_mut());
         if out.contains(&strip) {
@@ -2599,21 +3115,38 @@ impl App {
                 self.show_mirror_at(bar, strip, left, top.max(0), size);
                 return false;
             }
-            let right = match FindWindowExW(Some(bar), None, w!("ClockButton"), None) {
-                Ok(clock) if !clock.0.is_null() && IsWindowVisible(clock).as_bool() => {
-                    let mut cr = RECT::default();
-                    let _ = GetWindowRect(clock, &mut cr);
-                    cr.left
+            // StartAllBack draws its own notification area: the clock may not be a separate
+            // child window there, but TrayNotifyWnd is (#612). Its left edge is where the tray
+            // starts, so the widget must stay to the left of it.
+            let mut tray_rect = RECT::default();
+            let has_tray = FindWindowExW(Some(bar), None, w!("TrayNotifyWnd"), None).is_ok_and(|tray| {
+                IsWindowVisible(tray).as_bool()
+                    && GetWindowRect(tray, &mut tray_rect).is_ok()
+                    && tray_rect.left > br.left
+                    && tray_rect.left < br.right
+                    && tray_rect.right > tray_rect.left
+                    && tray_rect.top < br.bottom
+                    && tray_rect.bottom > br.top
+            });
+            let right = if has_tray {
+                tray_rect.left
+            } else {
+                match FindWindowExW(Some(bar), None, w!("ClockButton"), None) {
+                    Ok(clock) if !clock.0.is_null() && IsWindowVisible(clock).as_bool() => {
+                        let mut cr = RECT::default();
+                        let _ = GetWindowRect(clock, &mut cr);
+                        cr.left
+                    }
+                    // Windows 11 draws this taskbar's clock itself: ask UI Automation where its
+                    // notification-area items start (cached; an estimate until the first answer).
+                    _ => match batteryhub::tray_probe::tray_left(bar, br, self.main, WM_TRAY_PROBED) {
+                        batteryhub::tray_probe::TrayEdge::Known(x) => x,
+                        // Not known yet (well under a second): stay hidden rather than show the copy in
+                        // the wrong place; WM_TRAY_PROBED places it as soon as the answer is there.
+                        batteryhub::tray_probe::TrayEdge::Pending => return true,
+                        batteryhub::tray_probe::TrayEdge::Unknown => br.right - (130.0 * s) as i32,
+                    },
                 }
-                // Windows 11 draws this taskbar's clock itself: ask UI Automation where its
-                // notification-area items start (cached; an estimate until the first answer).
-                _ => match batteryhub::tray_probe::tray_left(bar, br, self.main, WM_TRAY_PROBED) {
-                    batteryhub::tray_probe::TrayEdge::Known(x) => x,
-                    // Not known yet (well under a second): stay hidden rather than show the copy in
-                    // the wrong place; WM_TRAY_PROBED places it as soon as the answer is there.
-                    batteryhub::tray_probe::TrayEdge::Pending => return true,
-                    batteryhub::tray_probe::TrayEdge::Unknown => br.right - (130.0 * s) as i32,
-                },
             };
             let lay = self.layout_of(strip);
             let Some(left) = self.widget_left(bar, br, right, size.cx, s, &lay) else { return true };
@@ -2803,6 +3336,11 @@ impl App {
 
     /// Keeps the strip just left of the notification area (checked every second, like the original).
     fn place(&mut self) {
+        // The strip owns the open menu; hiding, popping or moving it now dismisses the menu and
+        // leaves the widget apparently off until the next placement tick brings it back.
+        if MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         // Waiting for the copies only before the widget first appears (so every taskbar shows it at
         // the same moment): a shown widget keeps following its place while a copy's is not known
         // yet (it moved only on the other monitor after a position change).
@@ -3524,6 +4062,12 @@ impl App {
     /// between the two is crossed in a moment); TIMER_AWAY then watches where it is.
     fn leave_strip(&mut self) {
         self.tracking = false;
+        // A pinned card stays open, but the strip is no longer under the mouse: drop the hover
+        // highlight even then.
+        self.set_hovered(HWND::default());
+        if self.card_pinned.is_some() {
+            return;
+        }
         if !self.card.0.is_null() && self.card_anim.visible && self.card_anim.showing {
             self.card_away = Some(Instant::now());
             unsafe {
@@ -3538,6 +4082,9 @@ impl App {
     /// TIMER_AWAY: keeps the card while the mouse is on it, and closes it once the mouse has been
     /// on neither the card nor the strip for a moment.
     fn away_step(&mut self) {
+        if self.card_pinned.is_some() {
+            return;
+        }
         let mut pt = POINT::default();
         let under = unsafe { GetCursorPos(&mut pt).is_ok().then(|| WindowFromPoint(pt)) };
         if under.is_some_and(|w| w == self.card) && self.card_anim.showing {
@@ -3781,8 +4328,13 @@ impl App {
         let x = if vertical { y } else { x };
         let hit = self.view(on).and_then(|v| v.hits.iter().find(|h| x >= h.0 && x < h.1).map(|h| (h.2, h.0, h.1)));
         let mode = hit.and_then(|h| self.visible_at(h.0)).map_or(settings::HoverMode::Card, |d| settings::hover_mode(SETTINGS_KEY, &d.key));
+        // A pinned card owns the hover state: no highlight while it is open.
+        let mode = hover_card_mode(mode);
+        if self.card_pinned.is_some() {
+            self.set_hovered(HWND::default());
+            return;
+        }
         // The hover highlight (like Windows' own taskbar buttons) in every mode, "Nothing" included.
-        let _ = mode;
         self.set_hovered(on);
         if self.card_away.take().is_some() {
             unsafe {
@@ -3826,6 +4378,36 @@ impl App {
         }
     }
 
+    /// A click on a device with "Card on click": open its card and keep it there (#439).
+    fn click_device(&mut self, strip: HWND, x: i32, y: i32) {
+        if MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) || self.moving.is_some() {
+            return;
+        }
+        let pos = if self.strip_vertical(strip) { y } else { x };
+        let hit = self.view(strip).and_then(|v| v.hits.iter().find(|h| pos >= h.0 && pos < h.1).map(|h| (h.2, h.0, h.1)));
+        let Some((i, from, to)) = hit else {
+            if self.card_pinned.is_some() {
+                self.hide_tip();
+            }
+            return;
+        };
+        let Some(key) = self.visible_at(i).map(|d| d.key.clone()) else { return };
+        let on = settings::card_on_click(SETTINGS_KEY, &key);
+        dbg_log(&format!("click: {key} card_on_click={on}"));
+        if !on {
+            return;
+        }
+        if self.card_pinned == Some((i, strip)) {
+            self.hide_tip();
+            return;
+        }
+        self.tooltip_off();
+        self.show_card(i, strip, from, to);
+        self.card_pinned = Some((i, strip));
+        // The click card is independent of hover: no highlighted strip under the pinned card.
+        self.set_hovered(HWND::default());
+    }
+
     /// The short tooltip ("Mouse: 80% (charging)") above (or beside) device `i` of `strip`.
     fn tooltip_on(&mut self, i: usize, strip: HWND, from: i32, to: i32) {
         unsafe {
@@ -3866,6 +4448,7 @@ impl App {
 
     fn hide_tip(&mut self) {
         self.set_hovered(HWND::default());
+        self.card_pinned = None;
         self.card_away = None;
         self.card_scrub = None;
         unsafe {
@@ -3878,6 +4461,32 @@ impl App {
             unsafe {
                 let mut ti = tool_info(self.main, &mut [0u16]);
                 SendMessageW(self.tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), Some(LPARAM(&mut ti as *mut _ as isize)));
+            }
+        }
+    }
+
+    /// After a menu closes, re-arm the strip under the cursor. `hide_tip` clears tracking, and if
+    /// the mouse has not moved since the right-click no MOUSEMOVE comes to do it: the widget then
+    /// looks dead until the pointer is nudged.
+    fn after_menu(&mut self) {
+        let mut pt = POINT::default();
+        if !unsafe { GetCursorPos(&mut pt) }.is_ok() {
+            return;
+        }
+        let strips: Vec<HWND> = std::iter::once(self.strip)
+            .chain(self.mirrors.iter().map(|m| m.1))
+            .chain(self.parked.iter().map(|m| m.1))
+            .collect();
+        for strip in strips {
+            if strip.0.is_null() || !unsafe { IsWindow(Some(strip)) }.as_bool() {
+                continue;
+            }
+            let mut rc = RECT::default();
+            if unsafe { GetWindowRect(strip, &mut rc) }.is_ok() && unsafe { PtInRect(&rc, pt) }.as_bool() {
+                let mut at = pt;
+                let _ = unsafe { ScreenToClient(strip, &mut at) };
+                self.hover(strip, at.x, at.y);
+                break;
             }
         }
     }
@@ -3934,11 +4543,55 @@ impl App {
         });
     }
 
+    /// Reads of joined connections become one logical device under the canonical key (#644).
+    /// One reading wins; levels are never averaged, and only one point per poll reaches the history.
+    fn canonicalize(&self, fresh: &mut Vec<DeviceStatus>) {
+        if self.merged.is_empty() {
+            return;
+        }
+        let roots: HashSet<String> = self.merged.values().cloned().collect();
+        for s in fresh.iter_mut() {
+            s.key = settings::resolve_merged(&self.merged, &s.key);
+        }
+        // Prefer a live reading with a level, then power, over an asleep / unknown one.
+        let rank = |s: &DeviceStatus| -> (u8, u8) {
+            let live = if s.connected && !s.asleep && s.percent >= 0 { 2 } else if s.connected { 1 } else { 0 };
+            (live, u8::from(s.charging || s.full))
+        };
+        let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (i, s) in fresh.iter().enumerate() {
+            if !roots.contains(&s.key) {
+                continue;
+            }
+            match best.get(&s.key) {
+                Some(&j) if rank(&fresh[j]) >= rank(s) => {}
+                _ => {
+                    best.insert(s.key.clone(), i);
+                }
+            }
+        }
+        if best.is_empty() {
+            return;
+        }
+        let keep: HashSet<usize> = best.into_values().collect();
+        let mut out = Vec::with_capacity(keep.len());
+        for (i, s) in std::mem::take(fresh).into_iter().enumerate() {
+            if !roots.contains(&s.key) || keep.contains(&i) {
+                out.push(s);
+            }
+        }
+        *fresh = out;
+    }
+
     /// Merges a quick read: only devices behind the receivers in `ids` are updated or removed.
-    fn on_quick_result(&mut self, fresh: Vec<DeviceStatus>, ids: &[(u16, u16)]) {
+    fn on_quick_result(&mut self, mut fresh: Vec<DeviceStatus>, ids: &[(u16, u16)]) {
         self.polling = false;
+        self.canonicalize(&mut fresh);
         let keys: HashSet<String> = fresh.iter().map(|s| s.key.clone()).collect();
         self.devices.retain(|k, t| {
+            if self.merged.contains_key(k) {
+                return false; // a joined connection is now part of its target (#644)
+            }
             let Some(hw) = t.status.hw else { return true };
             if !ids.contains(&hw) || keys.contains(k) {
                 return true;
@@ -3985,6 +4638,14 @@ impl App {
             }
             let reported = std::mem::take(&mut s.name);
             s.name = self.names.get(&s.key).cloned().unwrap_or_else(|| reported.clone());
+            // Ring style: a change of power state starts the one-second open / close animation.
+            if self.ring {
+                let was = self.devices.get(&s.key).is_some_and(|t| t.status.is_charging() || t.status.is_full());
+                let plugged = s.is_charging() || s.is_full();
+                if was != plugged {
+                    self.ring_charge.insert(s.key.clone(), (now, plugged));
+                }
+            }
             self.check_critical(&s);
             self.devices.insert(s.key.clone(), Tracked { status: s, seen: now, reported });
         }
@@ -4030,6 +4691,7 @@ impl App {
                 self.history.mark_dirty();
                 self.saved_order = settings::order(SETTINGS_KEY);
                 self.names = settings::names(SETTINGS_KEY);
+                self.merged = settings::merged_targets(SETTINGS_KEY);
                 self.hidden = settings::hidden(SETTINGS_KEY);
             }
         }
@@ -4195,6 +4857,7 @@ impl App {
 
     /// Left button down on a strip: the device under the mouse can be dragged to another place.
     fn start_drag(&mut self, strip: HWND, x: i32, y: i32) {
+        self.drag_moved = false;
         if self.lock_order {
             return;
         }
@@ -4218,6 +4881,7 @@ impl App {
         if x == self.drag_at {
             return;
         }
+        self.drag_moved = true;
         self.drag_at = x;
         self.hide_tip();
         let hits = self.view(self.drag_on).map(|v| v.hits.clone()).unwrap_or_default();
@@ -4461,6 +5125,7 @@ impl App {
     fn on_result(&mut self, mut fresh: Vec<DeviceStatus>) {
         fresh.extend(demo_devices());
         self.infer_charging(&mut fresh);
+        self.canonicalize(&mut fresh);
         self.polling = false;
         self.loaded = true;
         self.manual = false;
@@ -4477,6 +5142,9 @@ impl App {
         //  * Bluetooth / BLE / XInput devices are only reported while connected, so missing
         //    means disconnected: removed at once.
         self.devices.retain(|k, t| {
+            if self.merged.contains_key(k) {
+                return false; // a joined connection is now part of its target (#644)
+            }
             if keys.contains(k) {
                 return true;
             }
@@ -4492,6 +5160,8 @@ impl App {
         });
         self.offline_hw.clear();
         self.merge(fresh);
+        let live: HashSet<String> = self.devices.keys().cloned().collect();
+        self.ring_charge.retain(|k, _| live.contains(k));
         if std::mem::take(&mut self.pending_change) {
             self.devchange = true;
             self.start_poll();
@@ -4513,6 +5183,7 @@ impl App {
         self.lock_order = batteryhub::util::reg_get_dword(SETTINGS_KEY, "LockDeviceOrder").unwrap_or(0) != 0;
         self.charge_anim = batteryhub::util::reg_get_dword(SETTINGS_KEY, "ChargingAnimation").unwrap_or(0) != 0;
         self.ring = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetStyle").unwrap_or(0) == 1;
+        self.connection_icons = batteryhub::util::reg_get_dword(SETTINGS_KEY, "ConnectionIcons").unwrap_or(0) != 0;
         settings::ORDER_LOCKED.store(self.lock_order, std::sync::atomic::Ordering::Relaxed);
         self.hide_empty = batteryhub::util::reg_get_dword(SETTINGS_KEY, "HideWhenEmpty").unwrap_or(0) != 0;
         self.offset_y = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffsetY").unwrap_or(0) as i32;
@@ -5110,8 +5781,38 @@ unsafe fn choose_color(owner: HWND, current: Option<(u8, u8, u8)>) -> Option<(u8
     ok.then_some(((c & 0xFF) as u8, (c >> 8 & 0xFF) as u8, (c >> 16 & 0xFF) as u8))
 }
 
+/// Windows' file dialog for a device's own icon (#476); None when cancelled.
+unsafe fn choose_icon(owner: HWND) -> Option<String> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::UI::Controls::Dialogs::{
+        OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW, GetOpenFileNameW,
+    };
+    let filter: Vec<u16> = "Icon files\0*.ico;*.png;*.bmp;*.gif;*.jpg;*.jpeg\0All files\0*.*\0\0".encode_utf16().collect();
+    let title: Vec<u16> = tr("Custom icon...").encode_utf16().chain(Some(0)).collect();
+    let mut file = vec![0u16; 32768];
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: PCWSTR::from_raw(filter.as_ptr()),
+        lpstrFile: PWSTR::from_raw(file.as_mut_ptr()),
+        nMaxFile: file.len() as u32,
+        lpstrTitle: PCWSTR::from_raw(title.as_ptr()),
+        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
+        return None;
+    }
+    let n = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+    let path = String::from_utf16_lossy(&file[..n]);
+    (!path.is_empty()).then_some(path)
+}
+
 unsafe fn show_menu(from: Option<HWND>) {
     unsafe {
+        // One menu at a time. While it is up, `MENU_OPEN` also keeps the widget from popping out
+        // (see `place`): a second right-click here would nest menus and leave the flag out of sync.
+        let Some(guard) = MenuGuard::enter() else { return };
         let (main, devices, renamed, hidden, vertical) = with_app(|a| {
             a.hide_tip();
             a.menu_on = from.filter(|h| a.view(*h).is_some()).unwrap_or(a.strip);
@@ -5303,10 +6004,11 @@ unsafe fn show_menu(from: Option<HWND>) {
                     let _ = AppendMenuW(widget, MF_STRING | check(mirroring), ID_MIRRORING, &windows::core::HSTRING::from(tr("Mirror other widgets")));
                 }
                 let _ = AppendMenuW(widget, MF_STRING | check(lock_order), ID_LOCK_ORDER, &windows::core::HSTRING::from(tr("Lock device positions")));
-                let (charge_anim, ring) = with_app(|a| (a.charge_anim, a.ring)).unwrap_or_default();
+                let (charge_anim, ring, connection_icons) = with_app(|a| (a.charge_anim, a.ring, a.connection_icons)).unwrap_or_default();
                 let _ = AppendMenuW(widget, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
                 let _ = AppendMenuW(widget, MF_STRING | check(ring), ID_RING, &windows::core::HSTRING::from(tr("Ring style (icon inside a ring filled to the level)")));
                 let _ = AppendMenuW(widget, MF_STRING | check(charge_anim), ID_CHARGE_ANIM, &windows::core::HSTRING::from(tr("Charging animation")));
+                let _ = AppendMenuW(widget, MF_STRING | check(connection_icons), ID_CONNECTION_ICONS, &windows::core::HSTRING::from(tr("Show connection icons")));
                 let n = GetMenuItemCount(Some(menu));
                 let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, widget.0 as usize, &windows::core::HSTRING::from(tr("Widget")));
                 icons.set(menu, n as u32, true, ui::glyph::VIEW);
@@ -5425,14 +6127,17 @@ unsafe fn show_menu(from: Option<HWND>) {
             // Menu colours follow the taskbar: dark on a dark taskbar, light on a light one.
             ui::set_menu_theme(owner, dark);
             // Drawn like Windows 11's own context menus (rows, icons, highlight, chevrons).
-            let _modern = ui::ModernMenu::apply(menu, &icons, owner, dark);
-            MENU_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+            let modern = ui::ModernMenu::apply(menu, &icons, owner, dark);
             let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, None, owner, None);
-            MENU_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
             // Whatever the mouse crossed while the menu was open does not open the card.
             with_app(|a| a.hide_tip());
+            drop(modern);
             let _ = PostMessageW(Some(main), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
+            drop(guard);
+            // No MOUSEMOVE arrives if the pointer stayed still during the menu: re-arm the strip so
+            // it reacts at once instead of looking switched off for a moment.
+            with_app(|a| a.after_menu());
             match cmd.0 as usize {
                 ID_EXIT => {
                     let _ = DestroyWindow(main);
@@ -5497,6 +6202,15 @@ unsafe fn show_menu(from: Option<HWND>) {
                     with_app(|a| {
                         a.charge_anim = !a.charge_anim;
                         save_dword("ChargingAnimation", a.charge_anim as u32);
+                        a.paint();
+                    });
+                }
+                ID_CONNECTION_ICONS => {
+                    with_app(|a| {
+                        a.connection_icons = !a.connection_icons;
+                        save_dword("ConnectionIcons", a.connection_icons as u32);
+                        // Same pop in both directions: appearing and disappearing.
+                        a.badge_at = Some((Instant::now(), a.connection_icons));
                         a.paint();
                     });
                 }
@@ -5680,6 +6394,13 @@ unsafe fn show_menu(from: Option<HWND>) {
                     save_dword("RefreshMinutes", minutes);
                     SetTimer(Some(main), TIMER_POLL, minutes * 60_000, None);
                 }
+                id if id >= settings::MERGE_ID_BASE => {
+                    if let Some((dev, target)) = settings::decode_merge_id(id)
+                        && let (Some(a), Some(b)) = (devices.get(dev), devices.get(target))
+                    {
+                        join_devices(a, b);
+                    }
+                }
                 id => {
                     if let Some((dev, action)) = settings::decode_menu_id(id)
                         && let Some(d) = devices.get(dev)
@@ -5727,6 +6448,19 @@ fn confirm_reset(main: HWND, d: &DeviceStatus) {
 }
 
 /// An item of a device's submenu was chosen.
+/// Drops a device's custom icon and redraws every widget (#476). Also used when the dashboard's
+/// "Use the built-in icon" button asks for it over WM_COPYDATA.
+fn reset_icon(key: &str) {
+    if let Some(old) = settings::icon_file(SETTINGS_KEY, key) {
+        batteryhub::custom_icon::forget(&old);
+    }
+    settings::clear_icon_file(SETTINGS_KEY, key);
+    with_app(|a| {
+        a.card_cache.clear();
+        a.paint();
+    });
+}
+
 fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[DeviceStatus]) {
     use settings::DeviceAction;
     let reported = with_app(|a| a.devices.get(&d.key).map(|t| t.reported.clone())).flatten().unwrap_or_else(|| d.name.clone());
@@ -5753,6 +6487,12 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
         }
         DeviceAction::Hover(m) => {
             settings::set_hover_mode(SETTINGS_KEY, &d.key, m);
+            with_app(|a| a.hide_tip());
+        }
+        DeviceAction::ToggleCardOnClick => {
+            let on = !settings::card_on_click(SETTINGS_KEY, &d.key);
+            settings::set_card_on_click(SETTINGS_KEY, &d.key, on);
+            dbg_log(&format!("menu: {} card_on_click={on}", d.key));
             with_app(|a| a.hide_tip());
         }
         DeviceAction::ToggleCardChart => {
@@ -5841,12 +6581,79 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
                 with_app(|a| a.swap_devices(&d.key, &other.key));
             }
         }
+        DeviceAction::Unmerge => separate_device(&d.key),
+        DeviceAction::CustomIcon => {
+            let Some(main) = with_app(|a| a.main) else { return };
+            let Some(path) = (unsafe { choose_icon(main) }) else { return };
+            if batteryhub::custom_icon::load(&path, 64).is_none() {
+                message(main, &tr("The file could not be read as an image."), MB_ICONWARNING);
+                return;
+            }
+            if let Some(old) = settings::icon_file(SETTINGS_KEY, &d.key) {
+                batteryhub::custom_icon::forget(&old);
+            }
+            settings::set_icon_file(SETTINGS_KEY, &d.key, &path);
+            with_app(|a| {
+                a.card_cache.clear();
+                a.paint();
+            });
+        }
+        DeviceAction::ResetIcon => reset_icon(&d.key),
         DeviceAction::ResetHistory => {
             if let Some(main) = with_app(|a| a.main) {
                 confirm_reset(main, d);
             }
         }
     }
+}
+
+/// Joins two connections of one physical device into one logical device (#644). The second one
+/// keeps its key, history and settings; the first one's readings and settings are moved under it.
+fn join_devices(from: &DeviceStatus, to: &DeviceStatus) {
+    let Some(main) = with_app(|a| a.main) else { return };
+    let question = trf(
+        "Join \"{a}\" and \"{b}\" as one device?\n\nTheir battery history and settings are combined under \"{b}\". Both connections then show one device. They can be separated again from the device menu; the combined history stays together.",
+        &[("a", &from.name), ("b", &to.name)],
+    );
+    let answer = unsafe {
+        MessageBoxW(
+            Some(main),
+            &windows::core::HSTRING::from(question),
+            &windows::core::HSTRING::from(tr("Join with another connection")),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        )
+    };
+    if answer != IDYES {
+        return;
+    }
+    with_app(|a| {
+        a.save_history_now();
+        a.history.merge_series(&from.key, &to.key, batteryhub::history::gap_limit(refresh_minutes()));
+        a.history.mark_dirty();
+        a.save_history_now();
+        batteryhub::dashboard::notify_history_changed();
+    });
+    settings::move_device_settings(SETTINGS_KEY, &from.key, &to.key);
+    settings::set_merged(SETTINGS_KEY, &from.key, &to.key);
+    reload_after_merge();
+}
+
+/// Undoes a join for future readings (#644). The combined history stays under the kept key.
+fn separate_device(key: &str) {
+    settings::clear_merged(SETTINGS_KEY, key);
+    reload_after_merge();
+}
+
+fn reload_after_merge() {
+    with_app(|a| {
+        a.merged = settings::merged_targets(SETTINGS_KEY);
+        a.names = settings::names(SETTINGS_KEY);
+        a.hidden = settings::hidden(SETTINGS_KEY);
+        a.saved_order = settings::order(SETTINGS_KEY);
+        a.card_cache.clear();
+        a.paint();
+        a.send_to_dashboards();
+    });
 }
 
 // ---- window procedures -------------------------------------------------------------------------
@@ -6187,6 +6994,7 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 with_app(|a| {
                     if a.moving.is_some() {
                         a.end_move(true);
+                        a.drag_moved = true; // placing the widget is not a click on a device
                     } else {
                         a.start_drag(hwnd, (lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
                     }
@@ -6194,12 +7002,20 @@ extern "system" fn strip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                with_app(|a| a.end_drag());
+                let (x, y) = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+                with_app(|a| {
+                    let moved = a.drag_moved;
+                    a.end_drag();
+                    if !moved {
+                        a.click_device(hwnd, x, y);
+                    }
+                });
                 LRESULT(0)
             }
             WM_CAPTURECHANGED => {
                 with_app(|a| {
                     a.drag = None;
+                    a.drag_moved = true;
                     a.end_move(true);
                 });
                 LRESULT(0)
@@ -6237,7 +7053,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                     TIMER_QUICK => a.start_quick(),
                     TIMER_NOTIFY => a.end_notify(),
                     TIMER_AWAY => a.away_step(),
-                    TIMER_SLIDE | TIMER_CHARGE => a.paint(),
+                    TIMER_SLIDE | TIMER_CHARGE | TIMER_RING_CHARGE | TIMER_BADGE => a.paint(),
                     TIMER_MIRROR_IN => a.mirror_in_step(),
                     TIMER_GLIDE => a.glide_step(),
                     TIMER_LEFT_PROBE => {
@@ -6366,6 +7182,9 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 } else if cds.dwData == batteryhub::dashboard::COPY_DELETE && !cds.lpData.is_null() {
                     let key = String::from_utf8_lossy(std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize)).to_string();
                     with_app(|a| a.delete_device(&key));
+                } else if cds.dwData == batteryhub::dashboard::COPY_RESET_ICON && !cds.lpData.is_null() {
+                    let key = String::from_utf8_lossy(std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize)).to_string();
+                    reset_icon(&key);
                 } else if cds.dwData == batteryhub::dashboard::COPY_HELLO {
                     // A dashboard just opened: it gets every device right away (its device bar).
                     with_app(|a| a.send_to_dashboards());
@@ -6542,6 +7361,7 @@ fn main() {
             a.create_tooltip();
             a.history = batteryhub::history::History::load(EDITION, SETTINGS_KEY);
             a.names = settings::names(SETTINGS_KEY);
+            a.merged = settings::merged_targets(SETTINGS_KEY);
             a.hidden = settings::hidden(SETTINGS_KEY);
             a.saved_order = settings::order(SETTINGS_KEY);
             a.names_msg = batteryhub::rename::names_changed_message();
@@ -6610,6 +7430,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_click_mode_is_a_normal_hover_card() {
+        assert_eq!(hover_card_mode(settings::HoverMode::Click), settings::HoverMode::Card);
+        assert_eq!(hover_card_mode(settings::HoverMode::Tip), settings::HoverMode::Tip);
+        assert_eq!(hover_card_mode(settings::HoverMode::Off), settings::HoverMode::Off);
+    }
+
+    #[test]
     fn vertical_taskbar_column() {
         // Two devices (icon, level, bolt) and one (icon, level) in a 48 px wide column.
         let pieces = [(Some(0), 16, 16), (Some(0), 26, 14), (Some(0), 8, 11), (Some(1), 16, 16), (Some(1), 30, 14)];
@@ -6628,6 +7455,98 @@ mod tests {
         // The "no devices" glyph alone.
         let (pos, h, hits) = column_layout(&[(None, 16, 16)], 40, 8, 2, 12, 2);
         assert_eq!((pos[0], h, hits.len()), ((12, 8, true), 32, 0));
+    }
+
+    #[test]
+    fn connection_badges_are_icons_only() {
+        let mark = |via: &str, name: &str, vid: Option<u16>| connection_badge(via, name, vid);
+        assert_eq!(mark("Bluetooth LE", "PRO 2 LIGHTSPEED", Some(0x046D)), Some((GLYPH_BLUETOOTH, false)));
+        assert_eq!(mark("Wi-Fi (2.4 GHz)", "Headset", None), Some((GLYPH_WIFI, false)));
+        assert_eq!(mark("2.4 GHz receiver", "Headset", None), Some((GLYPH_WIFI, false)));
+        assert_eq!(mark("USB cable", "PRO 2 LIGHTSPEED", Some(0x046D)), Some((GLYPH_USB, false)));
+        assert_eq!(mark("HID", "Controller", None), Some((GLYPH_HID, false)));
+        assert_eq!(mark("2.4 GHz receiver", "PRO 2 LIGHTSPEED", Some(0x046D)), Some((GLYPH_WIFI, true)));
+        assert_eq!(mark("2.4 GHz receiver", "My mouse", Some(0x046D)), Some((GLYPH_WIFI, true))); // renamed too
+        assert_eq!(mark("Logitech receiver", "G Pro", None), Some((GLYPH_WIFI, true)));
+        assert_eq!(mark("something else", "Headset", None), None);
+        let icon_font = make_font(10, 400, "Segoe Fluent Icons", "Segoe MDL2 Assets", 0);
+        if !icon_font.0.is_null() {
+            let wifi = mask(&GLYPH_WIFI.to_string(), icon_font, false);
+            let bolt = bolt_mask((wifi.h as f32 * 0.9).round() as i32);
+            let m = overlay_mask(&wifi, &bolt, (wifi.w - bolt.w) / 2, (wifi.h - bolt.h) / 2);
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(icon_font.0));
+            }
+            assert_eq!((m.w, m.h), (wifi.w, wifi.h)); // one icon, no extra line of text
+            assert!(m.a.iter().any(|&a| a >= 200));
+        }
+    }
+
+    #[test]
+    fn ring_gap_opens_with_round_caps() {
+        let icon = Mask { w: 1, h: 1, a: vec![255] };
+        let (_, closed) = ring_masks(&icon, 28, 2.5, 100);
+        let (_, open) = ring_masks_with(&icon, 28, 2.5, 1.0, RING_GAP, 1.0);
+        assert_eq!(open.a.len(), 28 * 28);
+        assert!(closed.a[2 * 28 + 14] > 128); // the top of the ring is there when closed
+        assert_eq!(open.a[2 * 28 + 14], 0); // and gone when open
+        assert!(open.a[14 * 28 + 26] > 128); // the rest stays fully charged
+        assert!(open.a[5 * 28 + 21] > 0); // the end of the arc is rounded into the gap
+    }
+
+    #[test]
+    fn ring_bolt_sits_in_the_top_gap() {
+        let icon = Mask { w: 1, h: 1, a: vec![255] };
+        let (base, open) = ring_masks_with(&icon, 28, 2.5, ring_fill_fraction(0.95, RING_GAP), RING_GAP, 1.0);
+        assert!(base.a.iter().any(|&a| a > 0 && a < 128)); // the unfilled remainder stays faint but visible
+        let bolt = ring_bolt_mask(&icon, 28, 2.5, RING_GAP, 1.0);
+        let (mut x0, mut y0, mut x1, mut y1) = (28i32, 28i32, -1i32, -1i32);
+        for y in 0..28 {
+            for x in 0..28 {
+                if bolt.a[y * 28 + x] > 8 {
+                    (x0, y0, x1, y1) = (x0.min(x as i32), y0.min(y as i32), x1.max(x as i32), y1.max(y as i32));
+                }
+            }
+        }
+        assert!(x1 >= x0 && y1 >= y0);
+        assert!(((x0 + x1 + 1) - 28).abs() <= 1); // centred on the ring's vertical axis
+        assert!(y1 < 10); // up in the top gap, not over the device icon in the middle
+        assert_eq!(open.a[2 * 28 + 14], 0); // the top arc is gone
+        assert!(open.a[14 * 28 + 25] > 128); // 95% still fills the rest of the ring
+    }
+
+    #[test]
+    fn ring_at_30_percent_has_no_stray_cap_on_the_left() {
+        let icon = Mask { w: 1, h: 1, a: vec![255] };
+        let (_, arc) = ring_masks_with(&icon, 28, 2.5, ring_fill_fraction(0.30, RING_GAP), RING_GAP, 1.0);
+        assert_eq!(arc.a[5 * 28 + 8], 0); // no bright pixels on the unfilled, left side
+        assert!(arc.a[5 * 28 + 21] > 128); // the filled arc starts with a round cap
+        assert!(arc.a[21 * 28 + 24] > 0); // and ends at 30% of the visible ring
+    }
+
+    #[test]
+    fn ring_level_is_spread_over_the_visible_arc() {
+        // With a 20% gap at the top, only 80% of the circle remains. 87% must fill 87% of that,
+        // not 87% of the whole circle (which would cover 96% of what can be seen).
+        let f = ring_fill_fraction(0.87, RING_GAP);
+        assert!((f - (0.1 + 0.87 * 0.8)).abs() < 0.001);
+        assert!((ring_fill_fraction(1.0, RING_GAP) - 0.9).abs() < 0.001);
+        assert!((ring_fill_fraction(0.0, RING_GAP) - 0.1).abs() < 0.001);
+        let icon = Mask { w: 1, h: 1, a: vec![255] };
+        let (_, arc) = ring_masks_with(&icon, 28, 2.5, f, RING_GAP, 1.0);
+        assert!(arc.a[14 * 28 + 25] > 128); // right-hand side is filled
+        assert_eq!(arc.a[6 * 28 + 7], 0); // the left end is not: it reads as 87%, not 100%
+    }
+
+    #[test]
+    fn badge_toggle_animates_in_both_directions() {
+        assert_eq!(badge_progress(0.0, true), 0.0);
+        assert_eq!(badge_progress(BADGE_MS, true), 1.0);
+        assert_eq!(badge_progress(0.0, false), 1.0);
+        assert_eq!(badge_progress(BADGE_MS, false), 0.0);
+        assert!((badge_progress(BADGE_MS / 2.0, true) - 0.5).abs() < 0.001);
+        assert!((badge_progress(BADGE_MS / 2.0, false) - 0.5).abs() < 0.001);
+        assert_eq!(badge_progress(BADGE_MS * 2.0, true), 1.0);
     }
 
     #[test]

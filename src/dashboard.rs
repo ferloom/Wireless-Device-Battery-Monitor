@@ -38,6 +38,8 @@ pub const COPY_HELLO: usize = 3;
 /// To the taskbar program: forget the (disconnected) device whose key is the data: its
 /// measurements, settings and entry.
 pub const COPY_DELETE: usize = 4;
+/// To the taskbar program: remove the device's custom icon and use the built-in one again.
+pub const COPY_RESET_ICON: usize = 5;
 /// The taskbar program's hidden main window.
 const TASKBAR_CLASS: PCWSTR = w!("BatteryHub.Taskbar.Main");
 const TIMER_ANIM: usize = 1;
@@ -54,6 +56,7 @@ const ID_RENAME: u32 = 20;
 const ID_CHART: u32 = 30;
 const ID_RESET: u32 = 25;
 const ID_DELETE: u32 = 26;
+const ID_RESET_ICON: u32 = 27;
 /// + device in the device bar.
 const ID_DEVICE: u32 = 100;
 /// Device bar: this many characters of a name, then "...".
@@ -164,6 +167,18 @@ fn delete_device(from: HWND, key: &str) {
     crate::settings::forget_device(SETTINGS_KEY, key);
 }
 
+/// Removes a device's custom icon. The taskbar program owns the setting and its image cache, so
+/// it is asked first; this process only drops its own copy of the image.
+fn reset_icon(from: HWND, key: &str) {
+    let old = crate::settings::icon_file(SETTINGS_KEY, key);
+    if let Some(path) = &old {
+        crate::custom_icon::forget(path);
+    }
+    if !send_to_taskbar(from, COPY_RESET_ICON, key.as_bytes()) {
+        crate::settings::clear_icon_file(SETTINGS_KEY, key);
+    }
+}
+
 /// A device bar label: the first characters of the name, then "...".
 pub fn short_name(name: &str) -> String {
     let chars: Vec<char> = name.trim().chars().collect();
@@ -193,6 +208,13 @@ fn reset_measurements(from: HWND, key: &str) {
             let _ = h.save_to(&path);
         }
     }
+}
+
+/// The user's own icon for a device, decoded at the requested size (#476). The dashboard is a
+/// separate process, so it reads the same registry setting the taskbar program uses.
+fn custom_icon(key: &str, size: i32) -> Option<crate::custom_icon::Sprite> {
+    let path = crate::settings::icon_file(SETTINGS_KEY, key)?;
+    crate::custom_icon::load(&path, size.max(1) as u32)
 }
 
 /// Earbuds icon: two buds (head and stem) centred on (cx, cy), `size` px tall; a bud that is not
@@ -564,6 +586,8 @@ impl Dash {
             if s.kind == DeviceKind::Earbuds {
                 let (l, r) = s.buds.map(|bb| (bb.left >= 0, bb.right >= 0)).unwrap_or((true, true));
                 draw_buds(b, (icon_r.left + self.px(11.0)) as f32, (y + h / 2) as f32, self.px(17.0) as f32, ic, l, r);
+            } else if let Some(sp) = custom_icon(&s.key, icon_r.right - icon_r.left) {
+                b.rgba(&sp.px, sp.w, icon_r.left + ((icon_r.right - icon_r.left - sp.w) / 2), y + ((h - sp.h) / 2), 1.0);
             } else {
                 b.text(&s.kind.glyph().to_string(), gf, ic, icon_r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
@@ -609,6 +633,15 @@ impl Dash {
         if d.kind == DeviceKind::Earbuds {
             let (l, rr) = d.buds.map(|bb| (bb.left >= 0, bb.right >= 0)).unwrap_or((true, true));
             draw_buds(b, cx, cy, self.px(30.0) as f32, t.accent, l, rr);
+        } else if let Some(sp) = custom_icon(&d.key, (2.0 * r).round() as i32) {
+            let box_r = rect(pad, top, 2 * r as i32, 2 * r as i32);
+            b.rgba(
+                &sp.px,
+                sp.w,
+                box_r.left + ((box_r.right - box_r.left - sp.w) / 2),
+                box_r.top + ((box_r.bottom - box_r.top - sp.h) / 2),
+                1.0,
+            );
         } else {
             let gf = self.fonts.get(self.px(22.0), 400, Face::Icons);
             b.text(&d.kind.glyph().to_string(), gf, t.accent, rect(pad, top, 2 * r as i32, 2 * r as i32), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -691,11 +724,27 @@ impl Dash {
         }
         b.text(&label, rf, t.red, zr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         self.hits.add(zr, ID_RESET);
+        let mut next = zr.right + self.px(4.0);
+        // A custom icon can be removed here as well as in the device menu (#476).
+        if crate::settings::icon_file(SETTINGS_KEY, &d.key).is_some() {
+            let label = tr("Use the built-in icon");
+            let iw = b.measure(&label, rf).cx + self.px(16.0);
+            let ir = rect(next, rr.top, iw, self.px(24.0));
+            if ir.right > w - pad {
+                return top + self.px(96.0); // too narrow for another button
+            }
+            if self.hover == Some(ID_RESET_ICON) {
+                b.rrect(ir.left as f32, ir.top as f32, iw as f32, self.px(24.0) as f32, self.px(4.0) as f32, t.button_hover, 1.0);
+            }
+            b.text(&label, rf, t.accent, ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            self.hits.add(ir, ID_RESET_ICON);
+            next = ir.right + self.px(4.0);
+        }
         // A disconnected device can be deleted altogether (asks first).
         if !d.connected {
             let label = tr("Delete device...");
             let dw = b.measure(&label, rf).cx + self.px(16.0);
-            let dr = rect(zr.right + self.px(4.0), rr.top, dw, self.px(24.0));
+            let dr = rect(next, rr.top, dw, self.px(24.0));
             if self.hover == Some(ID_DELETE) {
                 b.rrect(dr.left as f32, dr.top as f32, dw as f32, self.px(24.0) as f32, self.px(4.0) as f32, t.button_hover, 1.0);
             }
@@ -1443,6 +1492,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                                     d.invalidate();
                                 });
                             }
+                        }
+                    }
+                    Some(ID_RESET_ICON) => {
+                        if let Some(s) = with(|d| d.status.clone()) {
+                            reset_icon(hwnd, &s.key);
+                            with(|d| d.invalidate());
                         }
                     }
                     Some(ID_DELETE) => {

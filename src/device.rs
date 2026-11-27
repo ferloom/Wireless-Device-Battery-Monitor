@@ -345,6 +345,9 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
         return Vec::new();
     }
     let mut ctx = PollContext { colls, ..Default::default() };
+    drivers::razer_blackshark_ps::poll_quick(&mut ctx); // cached; gate the audio before any mode switch
+    drivers::sony_pulse3d::poll_quick(&mut ctx); // push-only; drains queued status reports
+    drivers::steam::poll_quick(&mut ctx); // short listen only; the full read waits for 0x43
     drivers::steelseries::poll(&mut ctx);
     drivers::logitech_g321::poll(&mut ctx);
     drivers::logitech_prox2::poll(&mut ctx);
@@ -395,6 +398,8 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     drivers::barracuda_x::poll(&mut ctx);
     drivers::hyperx_cloud2::poll(&mut ctx);
     drivers::rawm::poll(&mut ctx);
+    drivers::rapoo::poll_quick(&mut ctx); // short passive listen only; the full read waits for report 07
+    drivers::ninjutso::poll(&mut ctx);
     drivers::jabra::poll(&mut ctx);
     drivers::jbl_quantum800::poll(&mut ctx);
     drivers::zowie::poll(&mut ctx);
@@ -427,6 +432,7 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     drivers::asus_mouse::poll(&mut ctx);
     drivers::rog_omni::poll(&mut ctx);
     drivers::machenike::poll(&mut ctx);
+    drivers::eweadn_x23::poll(&mut ctx);
     drivers::playstation::poll(&mut ctx);
     drivers::generic::poll(&mut ctx);
     ctx.out
@@ -522,6 +528,8 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
         ctx.colls.retain(|c| !ignored.contains(&(c.vid, c.pid)));
     }
     // Vendor drivers first, generic fallbacks last (same order as the original chain).
+    drivers::razer_blackshark_ps::poll(&mut ctx);
+    drivers::sony_pulse3d::poll(&mut ctx);
     drivers::steelseries::poll(&mut ctx);
     drivers::logitech_g321::poll(&mut ctx);
     drivers::logitech_prox2::poll(&mut ctx);
@@ -572,6 +580,8 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
     drivers::barracuda_x::poll(&mut ctx);
     drivers::hyperx_cloud2::poll(&mut ctx);
     drivers::rawm::poll(&mut ctx);
+    drivers::rapoo::poll(&mut ctx);
+    drivers::ninjutso::poll(&mut ctx);
     drivers::jabra::poll(&mut ctx);
     drivers::jbl_quantum800::poll(&mut ctx);
     drivers::zowie::poll(&mut ctx);
@@ -604,7 +614,9 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
     drivers::asus_mouse::poll(&mut ctx);
     drivers::rog_omni::poll(&mut ctx);
     drivers::machenike::poll(&mut ctx);
+    drivers::eweadn_x23::poll(&mut ctx);
     drivers::playstation::poll(&mut ctx);
+    drivers::steam::poll(&mut ctx); // listen-only; up to 5 s per live puck slot on a full read
     drivers::airpods::poll(&mut ctx);
     drivers::bluetooth::poll(&mut ctx);
     drivers::generic::poll(&mut ctx);

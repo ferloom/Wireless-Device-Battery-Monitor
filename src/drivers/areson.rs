@@ -1,6 +1,6 @@
-//! Redragon (Areson / CompX) devices on the "2.4G Wireless Receiver" 25A7:FA07 and its alternate id
-//! FA08: the M913 Impact Elite, the M915RGB-WL and others. Several devices use this receiver, so the
-//! entry gets a generic name.
+//! Redragon (Areson / CompX) devices on the "2.4G Wireless Receiver" 25A7:FA07 and its alternate ids
+//! FA08 and FA4A (#720): the M913 Impact Elite, the M915RGB-WL and others. Several devices use this
+//! receiver, so the entry gets a generic name.
 //!
 //! Protocol as documented by the original C++ BatteryHub (GPL-3.0, src/drivers/areson.cpp and
 //! docs/areson.md: captured from Redragon's software against an M915RGB-WL on 25A7:FA07, the level
@@ -21,7 +21,9 @@ use crate::hid::{self, HidColl, HidDev};
 use crate::util::{hex4, sleep_ms};
 
 const VID: u16 = 0x25A7;
-const PIDS: [u16; 2] = [0xFA07, 0xFA08];
+/// FA4A uses the same two collections as FA07/FA08 (#720); its level has not been confirmed on
+/// hardware, so a device that does not answer simply stays out of the list.
+const PIDS: [u16; 3] = [0xFA07, 0xFA08, 0xFA4A];
 const LEN: usize = 17;
 const WAIT_MS: u32 = 1800;
 

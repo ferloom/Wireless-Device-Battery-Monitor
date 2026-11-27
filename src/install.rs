@@ -265,6 +265,21 @@ impl Key {
     pub fn delete_value(&self, name: &str) -> bool {
         unsafe { RegDeleteValueW(self.0, &HSTRING::from(name)) == ERROR_SUCCESS }
     }
+
+    /// Copies a value from `src` to `name` here, keeping its registry type and raw bytes.
+    pub fn copy_value(&self, src: &Key, from: &str, name: &str) -> bool {
+        unsafe {
+            let mut ty = REG_VALUE_TYPE(0);
+            let mut len = 0u32;
+            let q = RegQueryValueExW(src.0, &HSTRING::from(from), None, Some(&mut ty), None, Some(&mut len));
+            if q != ERROR_SUCCESS {
+                return false;
+            }
+            let mut data = vec![0u8; len as usize];
+            let q = RegQueryValueExW(src.0, &HSTRING::from(from), None, Some(&mut ty), Some(data.as_mut_ptr()), Some(&mut len));
+            q == ERROR_SUCCESS && RegSetValueExW(self.0, &HSTRING::from(name), None, ty, Some(&data[..len as usize])) == ERROR_SUCCESS
+        }
+    }
 }
 
 pub fn delete_tree(hive: HKEY, path: &str) -> bool {
