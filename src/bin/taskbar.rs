@@ -5,6 +5,9 @@
 //! taskbar, unknown Explorer layout) it falls back to one notification-area icon per device.
 #![windows_subsystem = "windows"]
 
+#[path = "taskbar/tray_space.rs"]
+mod tray_space;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -516,6 +519,8 @@ struct App {
     tip_for: Option<usize>,
     tracking: bool,
     taskbar_created: u32,
+    use_tray_space: bool,
+    tray_space: tray_space::Reservation,
     /// (taskbar client height, DPI, light theme) the strip was last rendered for; a change (e.g.
     /// after leaving full screen, a DPI or theme change) triggers a fresh render.
     painted_for: (i32, u32, bool),
@@ -2794,6 +2799,9 @@ impl App {
 
     /// One tick of the 1 s placement timer: keep the strip in place, or fall back.
     fn tick(&mut self) {
+        if !self.use_tray_space || self.icons_mode || self.primary_hidden || self.vertical {
+            self.tray_space.clear(self.main);
+        }
         if std::env::var_os("BH_FORCE_FALLBACK").is_some() {
             return;
         }
@@ -3545,7 +3553,12 @@ impl App {
             }
             // Placed as soon as UI Automation has told where the taskbar's items are.
             let lay = self.main_layout();
-            let Some(left) = self.widget_left(self.taskbar, bar, tr.left, self.mv.size.cx, self.scale(), &lay) else {
+            let dock = if self.use_tray_space && !self.icons_mode {
+                self.tray_space.left(self.main, self.taskbar, tr, self.mv.size.cx)
+            } else {
+                None
+            };
+            let Some(left) = dock.or_else(|| self.widget_left(self.taskbar, bar, tr.left, self.mv.size.cx, self.scale(), &lay)) else {
                 self.forget_room(self.taskbar);
                 return;
             };
@@ -3568,7 +3581,7 @@ impl App {
             let _ = ClientToScreen(self.taskbar, &mut x0);
             let age = if self.align_left { ROOM_LEFT_AGE } else { ROOM_AGE };
             // Put there with the mouse: stays there.
-            let room = lay.side == SIDE_FREE
+            let room = dock.is_some() || lay.side == SIDE_FREE
                 || batteryhub::tray_probe::room(self.taskbar, bar, x0.x, x0.x + self.mv.size.cx, self.main, WM_TRAY_PROBED, age, IsWindowVisible(self.strip).as_bool())
                     .is_none_or(|r| r)
                     && x0.x + self.mv.size.cx <= tr.left;
@@ -5484,6 +5497,7 @@ impl App {
         self.offset_y = batteryhub::util::reg_get_dword(SETTINGS_KEY, "TaskbarOffsetY").unwrap_or(0) as i32;
         self.background = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetBackground").unwrap_or(0) != 0;
         self.icons_mode = batteryhub::util::reg_get_dword(SETTINGS_KEY, "NotificationIcons").unwrap_or(0) != 0;
+        self.use_tray_space = batteryhub::util::reg_get_dword(SETTINGS_KEY, "WidgetInsideTray").unwrap_or(0) != 0;
         self.compact = batteryhub::util::reg_get_dword(SETTINGS_KEY, "CompactWidget").unwrap_or(0) != 0;
         self.choice = widget_choice();
     }
@@ -7607,6 +7621,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 with_app(|a| {
                     a.save_history_now();
                     a.end_notify();
+                    a.tray_space.clear(a.main);
                     if !a.strip.0.is_null() {
                         let _ = DestroyWindow(a.strip);
                     }
@@ -7644,6 +7659,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                         a.last_place = Default::default();
                         a.painted_for = Default::default();
                         a.tray.clear();
+                        a.tray_space = Default::default();
                         a.tick();
                         if a.fallback {
                             a.sync_tray();
