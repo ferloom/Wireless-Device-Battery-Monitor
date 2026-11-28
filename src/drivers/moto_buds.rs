@@ -93,6 +93,9 @@ fn bytes(buf: &IBuffer) -> Option<Vec<u8>> {
 struct Found {
     addr: u64,
     name: String,
+    /// Windows often reports paired earbuds simply as "Headphones"; then the GATT service, not the
+    /// friendly name, identifies them and the UI gets a useful name.
+    known_name: bool,
 }
 
 fn bt_addr(inst: &str) -> Option<u64> {
@@ -103,6 +106,13 @@ fn bt_addr(inst: &str) -> Option<u64> {
 fn is_moto(name: &str) -> bool {
     let n = name.to_lowercase();
     n.contains("moto buds") || n.contains("motorola buds")
+}
+
+/// Candidates whose vendor GATT service is worth probing. Windows can rename paired earbuds to a
+/// generic audio name, so a name match alone misses them; the service check in `open` decides.
+fn sounds_audio(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["headphone", "headset", "earbud", "buds", "pods", "audio", "motorola"].iter().any(|s| n.contains(s))
 }
 
 /// Paired buds that Windows reports as connected. Addresses are stable for a paired classic/LE
@@ -117,8 +127,9 @@ fn paired() -> Vec<Found> {
                 continue;
             }
             let Some(name) = n.string(&DEVPKEY_Device_FriendlyName) else { continue };
-            if is_moto(&name) {
-                out.entry(addr).or_insert(Found { addr, name });
+            let known_name = is_moto(&name);
+            if known_name || sounds_audio(&name) {
+                out.entry(addr).or_insert(Found { addr, name, known_name });
             }
         }
     }
@@ -290,7 +301,7 @@ pub fn poll(ctx: &mut PollContext) {
         let case = buds.case.map(|(p, c)| format!("case {p}%{}", if c { " ⚡" } else { "" })).unwrap_or_default();
         let s = DeviceStatus {
             key: format!("moto:{:012X}", d.addr),
-            name: d.name,
+            name: if d.known_name { d.name } else { "Moto Buds".into() },
             kind: DeviceKind::Earbuds,
             via: "Bluetooth".into(),
             percent,
@@ -332,5 +343,14 @@ mod tests {
         assert!(is_moto("Moto Buds+"));
         assert!(is_moto("motorola buds (LE)"));
         assert!(!is_moto("JBL Go 3"));
+    }
+
+    #[test]
+    fn generic_windows_audio_names_are_probed() {
+        assert!(sounds_audio("Headphones"));
+        assert!(sounds_audio("Moto Buds+"));
+        assert!(sounds_audio("Motorola Buds LE"));
+        assert!(!sounds_audio("JBL Go 3"));
+        assert!(!sounds_audio("Mouse"));
     }
 }
