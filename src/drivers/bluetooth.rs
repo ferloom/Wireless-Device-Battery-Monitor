@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_DEVNODE_STATUS_FLAGS, CM_Get_DevNode_Status, CM_PROB, CR_SUCCESS, DN_HAS_PROBLEM};
 use windows::Win32::Devices::Properties::{DEVPKEY_Device_DeviceDesc, DEVPKEY_Device_FriendlyName, DEVPKEY_DeviceContainer_Category};
 
+use super::moto_buds;
 use super::sdi::{BT_BATTERY, CLASS_OF_DEVICE, DevSet, IS_CONNECTED, container_of_interface};
 use crate::ble;
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
@@ -65,8 +66,10 @@ fn is_portable_speaker(name: &str) -> bool {
 }
 
 /// Vendor drivers (AirPods, ...) also say "Bluetooth"; dedupe them by name, our own entries by key.
+/// A row that is off says nothing about this connection: a receiver whose keyboard switched to
+/// Bluetooth reports itself off under the same name (#818).
 fn is_duplicate(candidate: &DeviceStatus, existing: &[DeviceStatus]) -> bool {
-    existing.iter().any(|o| o.key == candidate.key || (!o.key.starts_with("bt:") && o.name == candidate.name))
+    existing.iter().any(|o| o.key == candidate.key || (o.connected && !o.key.starts_with("bt:") && o.name == candidate.name))
 }
 
 fn apply_fast_pair(s: &mut DeviceStatus, b: &ble::FastPairBattery) {
@@ -133,6 +136,8 @@ pub fn poll(ctx: &mut PollContext) {
     let mut container_le: BTreeMap<String, u64> = BTreeMap::new();
     let mut battery: BTreeMap<String, Found> = BTreeMap::new();
     let mut speakers: BTreeSet<String> = BTreeSet::new();
+    // Moto Buds already read over their own service (moto_buds.rs), whatever Windows calls them.
+    let mut moto: BTreeSet<String> = BTreeSet::new();
 
     // Only the classic and LE root nodes supply connection state and phone addresses.
     let [classic, le, services] = &sets;
@@ -155,6 +160,10 @@ pub fn poll(ctx: &mut PollContext) {
             }
             container_name.insert(cid.clone(), name.clone());
             if let Some(a) = bt_address(inst) {
+                let key = moto_buds::key(a);
+                if ctx.out.iter().any(|o| o.key == key) {
+                    moto.insert(cid.clone());
+                }
                 container_addr.insert(cid.clone(), a);
                 if inst.starts_with("BTHLE\\") {
                     container_le.insert(cid.clone(), a);
@@ -197,8 +206,10 @@ pub fn poll(ctx: &mut PollContext) {
         ble::retain_gatt_links(active);
     }
 
-    // Physical devices a driver above already reported over a HID interface on the BT link itself.
-    let mut reported = BTreeSet::new();
+    // Physical devices a driver above already reported over a HID interface on the BT link itself
+    // (or Moto Buds' own service).
+    ctx.bt_containers.extend(moto.iter().cloned()); // the generic fallback leaves them out too
+    let mut reported = moto;
     let mut hid_ids: BTreeMap<String, (u16, u16)> = BTreeMap::new();
     for c in &ctx.colls {
         let Some(cont) = container_of_interface(&c.path) else { continue };
@@ -297,6 +308,16 @@ pub fn poll(ctx: &mut PollContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_connected_row_of_the_same_name_hides_the_bluetooth_one() {
+        let row = |key: &str, connected| DeviceStatus { key: key.into(), name: "DSV2 Pro".into(), connected, ..Default::default() };
+        let bt = row("bt:{1}", true);
+        assert!(is_duplicate(&bt, &[row("razer:0290", true)]));
+        assert!(!is_duplicate(&bt, &[row("razer:0290", false)]));
+        assert!(is_duplicate(&bt, &[row("bt:{1}", false)])); // our own entry
+        assert!(!is_duplicate(&bt, &[row("bt:{2}", true)])); // another device of the same model
+    }
 
     #[test]
     fn portable_speakers_are_detected() {

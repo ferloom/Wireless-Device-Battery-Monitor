@@ -411,7 +411,7 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     drivers::barracuda_x::poll(&mut ctx);
     drivers::hyperx_cloud2::poll(&mut ctx);
     drivers::rawm::poll(&mut ctx);
-    drivers::rapoo::poll_quick(&mut ctx); // short passive listen only; the full read waits for report 07
+    drivers::rapoo::poll_quick(&mut ctx); // short listen; the full read waits for report 07, and the VT3SE is asked briefly
     drivers::ninjutso::poll(&mut ctx);
     drivers::jabra::poll(&mut ctx);
     drivers::jbl_quantum800::poll(&mut ctx);
@@ -427,10 +427,14 @@ pub fn poll_hardware(ids: &[(u16, u16)]) -> Vec<DeviceStatus> {
     drivers::gamesir::poll(&mut ctx);
     drivers::sinowealth::poll(&mut ctx);
     drivers::endgame_4k::poll(&mut ctx);
+    drivers::endgame_we::poll(&mut ctx);
+    drivers::hyperx_haste::poll(&mut ctx);
+    drivers::vaxee::poll(&mut ctx);
     drivers::mchose_glw::poll(&mut ctx);
     drivers::mchose_g3::poll(&mut ctx);
     drivers::ajazz_aj179::poll(&mut ctx);
     drivers::ajazz_8k::poll(&mut ctx);
+    drivers::ajazz_aj200p::poll(&mut ctx);
     drivers::aula_hub::poll(&mut ctx);
     drivers::mchose_x9::poll(&mut ctx);
     drivers::mchose_v9pro2::poll(&mut ctx);
@@ -609,10 +613,14 @@ fn poll_with(colls: Vec<HidColl>) -> Vec<DeviceStatus> {
     drivers::gamesir::poll(&mut ctx);
     drivers::sinowealth::poll(&mut ctx);
     drivers::endgame_4k::poll(&mut ctx);
+    drivers::endgame_we::poll(&mut ctx);
+    drivers::hyperx_haste::poll(&mut ctx);
+    drivers::vaxee::poll(&mut ctx);
     drivers::mchose_glw::poll(&mut ctx);
     drivers::mchose_g3::poll(&mut ctx);
     drivers::ajazz_aj179::poll(&mut ctx);
     drivers::ajazz_8k::poll(&mut ctx);
+    drivers::ajazz_aj200p::poll(&mut ctx);
     drivers::aula_hub::poll(&mut ctx);
     drivers::mchose_x9::poll(&mut ctx);
     drivers::mchose_v9pro2::poll(&mut ctx);

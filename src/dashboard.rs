@@ -731,15 +731,15 @@ impl Dash {
             let label = tr("Use the built-in icon");
             let iw = b.measure(&label, rf).cx + self.px(16.0);
             let ir = rect(next, rr.top, iw, self.px(24.0));
-            if ir.right > w - pad {
-                return top + self.px(96.0); // too narrow for another button
+            // Left out when the window is too narrow for it.
+            if ir.right <= w - pad {
+                if self.hover == Some(ID_RESET_ICON) {
+                    b.rrect(ir.left as f32, ir.top as f32, iw as f32, self.px(24.0) as f32, self.px(4.0) as f32, t.button_hover, 1.0);
+                }
+                b.text(&label, rf, t.accent, ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                self.hits.add(ir, ID_RESET_ICON);
+                next = ir.right + self.px(4.0);
             }
-            if self.hover == Some(ID_RESET_ICON) {
-                b.rrect(ir.left as f32, ir.top as f32, iw as f32, self.px(24.0) as f32, self.px(4.0) as f32, t.button_hover, 1.0);
-            }
-            b.text(&label, rf, t.accent, ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            self.hits.add(ir, ID_RESET_ICON);
-            next = ir.right + self.px(4.0);
         }
         // A disconnected device can be deleted altogether (asks first).
         if !d.connected {

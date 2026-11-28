@@ -16,6 +16,10 @@
 //! the existing query fails or gets no valid reply.
 //! Only this read is sent; the configuration-write command and the Bluetooth OTA service are never
 //! touched. A level of 0 from the receiver means the mouse is off or out of range.
+//!
+//! The Smailwolf RS6 (firmware FYA6-3311 V4.0.3) answers 100 % and no charging whatever its charge
+//! is, also while off; its own app hides the battery for that reason. So the AJ139 receiver is first
+//! asked whether the mouse is online (cmd ED, from PR #816), and a sleeping one is not read.
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -33,6 +37,9 @@ const DEVICES: [(u16, u16, bool, &str); 3] = [
     (0x391D, 0x1A03, false, "VGN Dragonfly 3 Pro"),
 ];
 const CMD_BATTERY: u8 = 0x30;
+const CMD_ONLINE: u8 = 0xED;
+/// The online reply's state byte: 2 = awake, 1 = asleep or off, 0 = on the cable.
+const ONLINE_ASLEEP: u8 = 1;
 const WAIT_MS: u64 = 700;
 /// A level that changes by more than this within one poll is a source switch or a misread, not a
 /// battery that filled up in a minute. The cable can claim 100 % while the receiver still reports
@@ -54,6 +61,31 @@ fn freq_request() -> [u8; 64] {
     let mut r = [0u8; 64];
     r[..8].copy_from_slice(&[0xF0, CMD_BATTERY, 0xA5, 0x0B, 0x2E, 0x01, 0x01, 0x01]);
     r
+}
+
+fn online_request() -> [u8; 64] {
+    let mut r = [0u8; 64];
+    r[..3].copy_from_slice(&[0xF0, CMD_ONLINE, 0x01]);
+    r
+}
+
+/// Online reply F0 ED 01 SS: Some(state).
+fn decode_online(r: &[u8]) -> Option<u8> {
+    (r.len() >= 4 && r[..3] == [0xF0, CMD_ONLINE, 0x01]).then(|| r[3])
+}
+
+/// Asks whether the mouse is there; None when the receiver does not answer that question.
+fn online(d: &HidDev) -> Option<u8> {
+    if !d.write(&online_request()) {
+        return None;
+    }
+    let end = Deadline::in_ms(WAIT_MS);
+    while !end.passed() {
+        if let Some(state) = d.read(end.left_ms()).and_then(|r| decode_online(&r)) {
+            return Some(state);
+        }
+    }
+    None
 }
 
 /// Battery reply (64 bytes, no report ID): Some((level, on USB power)).
@@ -102,6 +134,10 @@ fn read(c: &HidColl, receiver: bool) -> Option<(i32, bool)> {
     let d = HidDev::open(c)?;
     d.flush();
     let f0_eligible = uses_freq_query(c, receiver);
+    // Only an explicit "asleep" stops the read: other receivers need not answer this question.
+    if f0_eligible && online(&d) == Some(ONLINE_ASLEEP) {
+        return None;
+    }
     let legacy_request_sent = d.write(&request());
     let mut request_sent = legacy_request_sent;
     let mut freq_attempted = false;
@@ -252,10 +288,12 @@ pub fn poll(ctx: &mut PollContext) {
         }
     }
     if receiver_present || cable_present {
-        let mut cached = *LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let cached = *LAST.lock().unwrap_or_else(|e| e.into_inner());
         let picked = choose_reading(receiver_present, cable_present, receiver, cable, cached);
-        cached = picked;
-        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = cached;
+        // A silent mouse (asleep or empty) keeps its remembered level for when the cable goes in.
+        if picked.is_some() {
+            *LAST.lock().unwrap_or_else(|e| e.into_inner()) = picked;
+        }
         let hw = if receiver_present { (RECEIVER_VID, PID) } else { (CABLE_VID, PID) };
         let s = DeviceStatus {
             key: format!("ajazz139:{}:{}", hex4(RECEIVER_VID), hex4(PID)),
@@ -334,6 +372,15 @@ mod tests {
         r[9] = charging;
         r[3] = freq_checksum(&r);
         r
+    }
+
+    #[test]
+    fn online_reply() {
+        assert_eq!(&online_request()[..4], &[0xF0, 0xED, 0x01, 0x00]);
+        assert_eq!(decode_online(&[0xF0, 0xED, 0x01, 0x02]), Some(2));
+        assert_eq!(decode_online(&[0xF0, 0xED, 0x01, 0x01]), Some(ONLINE_ASLEEP));
+        assert_eq!(decode_online(&[0xF0, 0x30, 0x01, 0x02]), None);
+        assert_eq!(decode_online(&[0xF0, 0xED, 0x01]), None);
     }
 
     #[test]

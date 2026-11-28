@@ -354,6 +354,8 @@ fn read_one(c: &HidColl) -> Option<State> {
 struct Last {
     at: Instant,
     state: State,
+    /// How long `state` stands before the next read.
+    wait: Duration,
 }
 
 static LAST: Mutex<Option<Last>> = Mutex::new(None);
@@ -363,6 +365,15 @@ fn interval(state: State) -> Duration {
         State::Reading(_) => QUERY_EVERY,
         State::Offline => OFF_QUERY_EVERY,
         State::Unknown => RETRY,
+    }
+}
+
+/// What to show after a new read, and for how long: a blocked or unanswered one keeps the last
+/// level and is tried again soon.
+fn after_read(last: Option<State>, read: State) -> (State, Duration) {
+    match (read, last) {
+        (State::Unknown, Some(kept @ State::Reading(_))) => (kept, RETRY),
+        _ => (read, interval(read)),
     }
 }
 
@@ -378,17 +389,18 @@ fn poll_all(ctx: &mut PollContext) {
     // The lock spans the gate and the session: a full and a quick read must not talk at once.
     let mut guard = LAST.lock().unwrap_or_else(|e| e.into_inner());
     let cached = *guard;
-    let fresh = cached.filter(|l| l.at.elapsed() < interval(l.state));
+    let fresh = cached.filter(|l| l.at.elapsed() < l.wait);
     let state = match fresh {
         Some(l) => l.state,
         None => {
             // Switching mode interrupts the headset's audio; only do it at a silent mixer.
-            let state = if crate::audio::silent("blackshark") {
+            let read = if crate::audio::silent("blackshark") {
                 colls.iter().find_map(read_one).unwrap_or(State::Unknown)
             } else {
                 State::Unknown
             };
-            *guard = Some(Last { at: Instant::now(), state });
+            let (state, wait) = after_read(cached.map(|l| l.state), read);
+            *guard = Some(Last { at: Instant::now(), state, wait });
             state
         }
     };
@@ -484,6 +496,18 @@ mod tests {
         r[15] = 95; // a real jump is taken as-is
         s.note(&r);
         assert_eq!(s.reported.percent, Some(95));
+    }
+
+    #[test]
+    fn a_blocked_read_keeps_the_last_level() {
+        let level = State::Reading(Reading { percent: 70, charging: false, full: false, mv: 3929 });
+        let (state, wait) = after_read(Some(level), State::Unknown);
+        assert!(matches!(state, State::Reading(r) if r.percent == 70));
+        assert_eq!(wait, RETRY);
+        // Nothing to keep, or the headset was off: unknown.
+        assert!(matches!(after_read(None, State::Unknown).0, State::Unknown));
+        assert!(matches!(after_read(Some(State::Offline), State::Unknown).0, State::Unknown));
+        assert!(matches!(after_read(Some(level), State::Offline), (State::Offline, OFF_QUERY_EVERY)));
     }
 
     #[test]

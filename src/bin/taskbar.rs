@@ -499,9 +499,9 @@ struct App {
     /// Since when the mouse is on neither the strip nor the card: the card closes shortly after,
     /// so the mouse can move from the strip onto it.
     card_away: Option<Instant>,
-    /// A card opened by a click: (device, strip). Another click or the menu closes it; the mouse
-    /// leaving both the strip and the card closes it only in the "Away" mode (#439).
-    card_pinned: Option<(usize, HWND)>,
+    /// A card opened by a click: (device key, strip). Another click or the menu closes it; the
+    /// mouse leaving both the strip and the card closes it only in the "Away" mode (#439).
+    card_pinned: Option<(String, HWND)>,
     /// Which of the two ways above the pinned card uses (the default is "click elsewhere").
     card_dismiss: settings::CardDismiss,
     /// Mouse hook while a "click elsewhere" card is open.
@@ -1318,13 +1318,18 @@ fn badge_progress(ms: f32, showing: bool) -> f32 {
 }
 
 /// A device's own ICO / PNG on the strip (#476), in place of the built-in glyph.
-fn custom_piece(dev: Option<usize>, key: &str, max: i32, alpha: u32, gap_after: i32) -> Option<Piece> {
+fn custom_piece(dev: Option<usize>, key: &str, max: i32, color: COLORREF, alpha: u32, gap_after: i32) -> Option<Piece> {
     let path = settings::icon_file(SETTINGS_KEY, key)?;
     let sprite = batteryhub::custom_icon::load(&path, max.max(1) as u32)?;
-    let m = Mask { w: sprite.w, h: sprite.h, a: vec![255; (sprite.w * sprite.h) as usize] };
-    let mut p = Piece::new(dev, m, COLORREF(0), alpha, gap_after);
+    Some(rgba_piece(dev, sprite, color, alpha, gap_after))
+}
+
+/// A full-colour piece. Its mask is the image's shape and `color` the colour of its glow.
+fn rgba_piece(dev: Option<usize>, sprite: batteryhub::custom_icon::Sprite, color: COLORREF, alpha: u32, gap_after: i32) -> Piece {
+    let m = Mask { w: sprite.w, h: sprite.h, a: sprite.px.iter().map(|&p| (p >> 24) as u8).collect() };
+    let mut p = Piece::new(dev, m, color, alpha, gap_after);
     p.rgba = Some(sprite.px);
-    Some(p)
+    p
 }
 
 /// Premultiplied ARGB pixels of a tinted mask, for composing a custom icon into a ring (#476).
@@ -1339,15 +1344,15 @@ fn rgba_mask(m: &Mask, color: COLORREF, alpha: u32) -> Vec<u32> {
 }
 
 /// Source-over of premultiplied ARGB pixels at `(x, y)` into a `w`-wide canvas.
-fn overlay_rgba(base: &mut [u32], w: i32, src: &[u32], sw: i32, x: i32, y: i32, alpha: u32) {
-    if sw <= 0 || alpha == 0 {
+fn overlay_rgba(base: &mut [u32], w: i32, src: &[u32], sw: i32, x: i32, y: i32) {
+    if sw <= 0 {
         return;
     }
     let sh = (src.len() / sw as usize) as i32;
     for yy in 0..sh {
         for xx in 0..sw {
             let s = src[(yy * sw + xx) as usize];
-            let sa = ((s >> 24) & 0xFF) * alpha / 255;
+            let sa = (s >> 24) & 0xFF;
             if sa == 0 {
                 continue;
             }
@@ -1369,6 +1374,16 @@ fn overlay_rgba(base: &mut [u32], w: i32, src: &[u32], sw: i32, x: i32, y: i32, 
     }
 }
 
+/// The pixels of a ring with a user's icon in its middle, fully opaque: the piece's own alpha
+/// dims them once (asleep devices).
+fn compose_ring(base: &Mask, arc: &Mask, sprite: &batteryhub::custom_icon::Sprite, base_color: COLORREF, arc_color: COLORREF) -> Vec<u32> {
+    let d = base.w;
+    let mut px = rgba_mask(base, base_color, 255);
+    overlay_rgba(&mut px, d, &rgba_mask(arc, arc_color, 255), d, 0, 0);
+    overlay_rgba(&mut px, d, &sprite.px, sprite.w, (d - sprite.w) / 2, (d - sprite.h) / 2);
+    px
+}
+
 /// A user's icon inside the battery ring (#476), composed into one full-colour piece.
 fn custom_ring_piece(dev: Option<usize>, key: &str, d: i32, thick: f32, frac: f32, gap: f32, base_mul: f32, bolt_open: f32, base_color: COLORREF, arc_color: COLORREF, alpha: u32, gap_after: i32) -> Option<Piece> {
     let path = settings::icon_file(SETTINGS_KEY, key)?;
@@ -1381,9 +1396,7 @@ fn custom_ring_piece(dev: Option<usize>, key: &str, d: i32, thick: f32, frac: f3
             *v = (*v).max(*a);
         }
     }
-    let mut px = rgba_mask(&base, base_color, alpha);
-    overlay_rgba(&mut px, d, &rgba_mask(&arc, arc_color, alpha), d, 0, 0, 255);
-    overlay_rgba(&mut px, d, &sprite.px, sprite.w, (d - sprite.w) / 2, (d - sprite.h) / 2, alpha);
+    let px = compose_ring(&base, &arc, &sprite, base_color, arc_color);
     let m = Mask { w: d, h: d, a: vec![255; (d * d) as usize] };
     let mut p = Piece::new(dev, m, COLORREF(0), alpha, gap_after);
     p.rgba = Some(px);
@@ -1914,6 +1927,31 @@ impl App {
             let bolt_color = ui::bolt_color(d, light);
             let mark = bolt_color.is_some();
             let glow = settings::glow(SETTINGS_KEY, &d.key);
+            if self.ring && d.percent < 0 {
+                // Ring style without a level: the faint ring alone would read as 0%, so the "?"
+                // (or the coarse level) stands next to it. No filled arc, bolt or power colour.
+                let dpx = px(28.0);
+                let thick = (2.5 * s).max(2.0);
+                let ring_gap_after = px(4.0);
+                let icon = device_icon(d, ring_font, light);
+                let p = custom_ring_piece(Some(i), &d.key, dpx, thick, 0.0, 0.0, 1.0, 0.0, own, own, alpha, ring_gap_after)
+                    .unwrap_or_else(|| {
+                        let (base, _) = ring_masks_with(&icon, dpx, thick, 0.0, 0.0, 1.0);
+                        let mut p = Piece::new(Some(i), base, own, alpha, ring_gap_after);
+                        p.glow = glow;
+                        p
+                    });
+                pieces.push(p);
+                let gap = if badge_fade > 0.0 { px(2.0) } else { 0 };
+                pieces.push(Piece::new(Some(i), mask(&d.level(), text, light), fg, alpha, gap));
+                if badge_fade > 0.0 {
+                    let a = (alpha as f32 * badge_fade).round() as u32;
+                    if let Some(b) = badge_piece(Some(i), &d.via, &d.name, d.hw.map(|h| h.0), badge_icon_font, light, a, 0) {
+                        pieces.push(b);
+                    }
+                }
+                continue;
+            }
             if self.ring && d.percent >= 0 {
                 // Ring style: the icon inside a ring filled clockwise to the level. On power the
                 // top segment moves aside (with round ends), the unfilled remainder fades away and
@@ -1960,7 +1998,7 @@ impl App {
                 }
                 continue;
             }
-            let mut icon_piece = match custom_piece(Some(i), &d.key, px(24.0), alpha, px(5.0)) {
+            let mut icon_piece = match custom_piece(Some(i), &d.key, px(24.0), icon_tint(low), alpha, px(5.0)) {
                 Some(p) => p,
                 None => {
                     let icon = device_icon(d, icons, light);
@@ -2176,6 +2214,21 @@ impl App {
             } else {
                 let _ = KillTimer(Some(self.main), TIMER_BADGE);
             }
+        }
+    }
+
+    /// Starts the ring's animation when the new read `s` changes the device's power state.
+    fn track_ring_power(&mut self, s: &DeviceStatus, now: Instant) {
+        if s.percent < 0 {
+            // No level, no gauge: nothing to animate.
+            self.ring_charge.remove(&s.key);
+            return;
+        }
+        let was = self.devices.get(&s.key).map(|t| Self::ring_power(&t.status)).unwrap_or(RingPower::Off);
+        let now_power = Self::ring_power(s);
+        if was != now_power {
+            let from = self.ring_charge.get(&s.key).map(|a| a.to).unwrap_or(was);
+            self.ring_charge.insert(s.key.clone(), RingAnim { at: now, from, to: now_power });
         }
     }
 
@@ -4574,13 +4627,14 @@ impl App {
             }
             return;
         }
-        if self.card_pinned == Some((i, strip)) {
+        // By key: the device's place changes when others appear or leave.
+        if self.card_pinned.as_ref().is_some_and(|(k, s)| *k == key && *s == strip) {
             self.hide_tip();
             return;
         }
         self.tooltip_off();
         self.show_card(i, strip, from, to);
-        self.card_pinned = Some((i, strip));
+        self.card_pinned = Some((key.clone(), strip));
         self.card_dismiss = settings::card_dismiss(SETTINGS_KEY, &key);
         if self.card_dismiss == settings::CardDismiss::OutsideClick {
             self.watch_outside_click();
@@ -4767,10 +4821,30 @@ impl App {
         *fresh = out;
     }
 
+    /// A quick read sees only some connections of a joined device (#644): one that is off, asleep
+    /// or without a level must not replace a connection it did not read. When the connection shown
+    /// goes off itself, a full read looks for the others right after.
+    fn keep_other_connections(&mut self, fresh: &mut Vec<DeviceStatus>) {
+        let mut lost = false;
+        fresh.retain(|s| {
+            if !self.merged.values().any(|t| *t == s.key) {
+                return true;
+            }
+            let Some(shown) = self.devices.get(&s.key).map(|t| &t.status) else { return true };
+            if shown.hw == s.hw {
+                lost |= !s.connected;
+                return true;
+            }
+            s.connected && !s.asleep && s.percent >= 0
+        });
+        self.pending_change |= lost;
+    }
+
     /// Merges a quick read: only devices behind the receivers in `ids` are updated or removed.
     fn on_quick_result(&mut self, mut fresh: Vec<DeviceStatus>, ids: &[(u16, u16)]) {
         self.polling = false;
         self.canonicalize(&mut fresh);
+        self.keep_other_connections(&mut fresh);
         let keys: HashSet<String> = fresh.iter().map(|s| s.key.clone()).collect();
         self.devices.retain(|k, t| {
             if self.merged.contains_key(k) {
@@ -4825,12 +4899,7 @@ impl App {
             // Ring style: a change of power state animates the bolt colour too — green -> blue at
             // 100%, and blue -> the normal icon colour on unplug (never a detour back through green).
             if self.ring {
-                let was = self.devices.get(&s.key).map(|t| Self::ring_power(&t.status)).unwrap_or(RingPower::Off);
-                let now_power = Self::ring_power(&s);
-                if was != now_power {
-                    let from = self.ring_charge.get(&s.key).map(|a| a.to).unwrap_or(was);
-                    self.ring_charge.insert(s.key.clone(), RingAnim { at: now, from, to: now_power });
-                }
+                self.track_ring_power(&s, now);
             }
             self.check_critical(&s);
             self.devices.insert(s.key.clone(), Tracked { status: s, seen: now, reported });
@@ -5179,6 +5248,7 @@ impl App {
         settings::forget_device(SETTINGS_KEY, key);
         self.saved_order = settings::order(SETTINGS_KEY);
         self.names = settings::names(SETTINGS_KEY);
+        self.merged = settings::merged_targets(SETTINGS_KEY);
         self.hidden = settings::hidden(SETTINGS_KEY);
         self.paint();
         self.send_to_dashboards();
@@ -6824,6 +6894,7 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
         DeviceAction::CustomIcon => {
             let Some(main) = with_app(|a| a.main) else { return };
             let Some(path) = (unsafe { choose_icon(main) }) else { return };
+            batteryhub::custom_icon::forget(&path); // the file may have changed since it failed
             if batteryhub::custom_icon::load(&path, 64).is_none() {
                 message(main, &tr("The file could not be read as an image."), MB_ICONWARNING);
                 return;
@@ -6851,7 +6922,7 @@ fn device_action(d: &DeviceStatus, action: settings::DeviceAction, devices: &[De
 fn join_devices(from: &DeviceStatus, to: &DeviceStatus) {
     let Some(main) = with_app(|a| a.main) else { return };
     let question = trf(
-        "Join \"{a}\" and \"{b}\" as one device?\n\nTheir battery history and settings are combined under \"{b}\". Both connections then show one device. They can be separated again from the device menu; the combined history stays together.",
+        "Join \"{a}\" and \"{b}\" as one device?\n\nTheir battery history and settings are combined under \"{b}\". Both connections then show one device. They can be separated again from the device menu, but separating deletes their battery history.",
         &[("a", &from.name), ("b", &to.name)],
     );
     let answer = unsafe {
@@ -7922,6 +7993,119 @@ mod tests {
         let (_, arc) = ring_masks_with(&icon, 28, 2.5, f, RING_GAP, 1.0);
         assert!(arc.a[14 * 28 + 25] > 128); // right-hand side is filled
         assert_eq!(arc.a[6 * 28 + 7], 0); // the left end is not: it reads as 87%, not 100%
+    }
+
+    /// A speaker on the strip at `percent`.
+    fn speaker(percent: i32) -> DeviceStatus {
+        DeviceStatus { key: "test:speaker".into(), name: "Speaker".into(), via: "Bluetooth".into(), kind: DeviceKind::Speaker, percent, ..Default::default() }
+    }
+
+    /// The strip's pieces for one device at 100 % scale.
+    fn pieces_of(app: &mut App, d: DeviceStatus) -> Vec<Piece> {
+        let item = Item { key: d.key.clone(), dev: Some(d), vis: Some(0), f: 1.0, p: 1.0 };
+        app.pieces(&[item], 1.0, false)
+    }
+
+    #[test]
+    fn ring_style_marks_an_unknown_level() {
+        let mut app = App { ring: true, ..Default::default() };
+        // On power too: still no bolt, arc or power colour.
+        let on_power = DeviceStatus { charging: true, ..speaker(-1) };
+        for d in [speaker(-1), on_power] {
+            let p = pieces_of(&mut app, d);
+            assert_eq!(p.len(), 2); // the ring and the "?", no bolt
+            assert_eq!((p[0].m.w, p[0].m.h), (28, 28));
+            let top = p[0].m.a[2 * 28 + 14];
+            assert!(top > 0 && top < 128); // a closed, faint ring
+            assert!(p[0].second.is_none()); // with nothing filled
+            assert_eq!(p[0].color, rgb(255, 255, 255));
+            let (_, _, text, _) = app.strip_fonts(1.0);
+            let q = mask("?", text, false);
+            assert!(q.a.iter().any(|&a| a > 0));
+            assert_eq!(p[1].m.a, q.a);
+        }
+        // A coarse level is shown instead of the "?".
+        let p = pieces_of(&mut app, DeviceStatus { level_text: "Low".into(), ..speaker(-1) });
+        let (_, _, text, _) = app.strip_fonts(1.0);
+        assert_eq!(p[1].m.a, mask("Low", text, false).a);
+        // The connection mark follows, as it follows a known level's ring.
+        app.connection_icons = true;
+        let p = pieces_of(&mut app, speaker(-1));
+        assert_eq!(p.len(), 3);
+        assert_eq!((p[2].color, p[2].gap_after), (BADGE_GRAY, 0));
+    }
+
+    #[test]
+    fn ring_style_fills_a_speaker_with_a_level() {
+        let mut app = App { ring: true, ..Default::default() };
+        for percent in [60, 100] {
+            let p = pieces_of(&mut app, speaker(percent));
+            assert_eq!(p.len(), 1);
+            let (arc, _) = p[0].second.as_ref().unwrap();
+            assert!(arc.a[14 * 28 + 25] > 128);
+        }
+    }
+
+    #[test]
+    fn unknown_level_without_ring_style_is_icon_and_question_mark() {
+        let mut app = App::default();
+        let p = pieces_of(&mut app, speaker(-1));
+        assert_eq!(p.len(), 2);
+        let (icons, _, text, _) = app.strip_fonts(1.0);
+        assert_eq!(p[0].m.a, device_icon(&speaker(-1), icons, false).a);
+        assert_eq!(p[1].m.a, mask("?", text, false).a);
+    }
+
+    #[test]
+    fn a_quick_read_keeps_the_other_connection_of_a_joined_device() {
+        let receiver = Some((1, 2));
+        let reading = |hw, connected, percent| DeviceStatus { key: "bt".into(), hw, connected, percent, ..Default::default() };
+        let mut app = App { merged: [("usb".to_string(), "bt".to_string())].into(), ..Default::default() };
+        let show = |app: &mut App, s: DeviceStatus| {
+            app.devices.insert("bt".into(), Tracked { status: s, seen: Instant::now(), reported: String::new() });
+        };
+        let quick = |app: &mut App, s: DeviceStatus| {
+            let mut fresh = vec![s];
+            app.keep_other_connections(&mut fresh);
+            fresh.len()
+        };
+        // Shown over Bluetooth: the receiver that is off says nothing about it.
+        show(&mut app, reading(None, true, 50));
+        assert_eq!(quick(&mut app, reading(receiver, false, -1)), 0);
+        assert_eq!(quick(&mut app, reading(receiver, true, -1)), 0);
+        assert_eq!(quick(&mut app, reading(receiver, true, 60)), 1);
+        assert!(!app.pending_change);
+        // Shown through the receiver: it counts, and going off asks for a full read.
+        show(&mut app, reading(receiver, true, 60));
+        assert_eq!(quick(&mut app, reading(receiver, false, -1)), 1);
+        assert!(app.pending_change);
+    }
+
+    #[test]
+    fn a_custom_icon_keeps_its_shape_and_is_dimmed_once() {
+        use batteryhub::custom_icon::Sprite;
+        // One opaque pixel, one clear one.
+        let sprite = Sprite { w: 2, h: 1, px: vec![0xFFFF_0000, 0] };
+        let p = rgba_piece(None, sprite.clone(), rgb(255, 255, 255), 120, 0);
+        assert_eq!(p.m.a, [255, 0]); // the glow follows the image, not its square
+        assert_eq!((p.color, p.alpha), (rgb(255, 255, 255), 120));
+        let icon = Mask { w: 2, h: 1, a: vec![255; 2] };
+        let (base, arc) = ring_masks_with(&icon, 28, 2.5, 1.0, 0.0, 1.0);
+        let px = compose_ring(&base, &arc, &sprite, rgb(255, 255, 255), rgb(0, 255, 0));
+        assert_eq!(px[14 * 28 + 25], 0xFF00_FF00); // the filled ring, fully opaque
+    }
+
+    #[test]
+    fn unknown_level_starts_no_ring_animation() {
+        let mut app = App { ring: true, ..Default::default() };
+        let charging = |percent| DeviceStatus { charging: true, ..speaker(percent) };
+        app.track_ring_power(&charging(-1), Instant::now());
+        assert!(app.ring_charge.is_empty());
+        app.track_ring_power(&charging(50), Instant::now());
+        assert_eq!(app.ring_charge.len(), 1);
+        // The level gets lost while an animation runs: it is dropped.
+        app.track_ring_power(&charging(-1), Instant::now());
+        assert!(app.ring_charge.is_empty());
     }
 
     #[test]

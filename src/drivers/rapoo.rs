@@ -1,4 +1,4 @@
-//! Rapoo mice that push their battery level without being asked (VID 24AE):
+//! Rapoo mice on VID 24AE.
 //!
 //! * VT9 PRO on its older 1K 2.4 GHz receiver (PID 185A). Nothing is sent: the receiver pushes
 //!   input report `BB B0 42 40 06 01 15` by itself about every 3 seconds on the vendor collection
@@ -13,18 +13,32 @@
 //!   level is valid (the reporter also saw 2 while charging, which Rapoo A HUB confirmed). The
 //!   layout is from pedro3z0/rapoo-software-linux (docs/PROTOCOL.md, "Live status report"); the
 //!   reply and the charging meaning were confirmed by the owner on Windows and in a local build.
+//! * VT3SE on its 2.4 GHz dongle (PID 189F, "Rapoo Gaming Device"), which is asked instead of
+//!   pushing:
 //!
-//! Both collections are only read, for a few seconds per poll: a mouse that is switched off sends
-//! nothing, so the last level stays shown (dimmed after the grace time) instead of a made-up value.
-//! A poll that hears nothing does not claim the device, so no flicker is introduced while Rapoo A
-//! HUB is open.
+//!   ```text
+//!   SetFeature  00 | 80 01 00 00 00 00 00 7E    (IF 2, FF02:0001; checksum = 0xFF - (0x80 + 0x01) = 0x7E)
+//!   Input       06 56 PP 00 00 00 00 00         (IF 1, FF01:0001; PP = battery level 0..=100 %)
+//!   ```
+//!
+//!   Protocol from a USB capture of Rapoo's official software and live readings on a VT3SE. Only
+//!   this read-only query is sent; nothing else is written to the device. No reply means the
+//!   mouse is asleep or switched off (the last known level stays shown, dimmed, during the grace
+//!   period).
+//!
+//! The push-only collections are only read, for a few seconds per poll: a mouse that is switched
+//! off sends nothing, so the last level stays shown (dimmed after the grace time) instead of a
+//! made-up value. A poll that hears nothing does not claim the device, so no flicker is introduced
+//! while Rapoo A HUB is open.
 use crate::device::{DeviceKind, DeviceStatus, PollContext};
+use crate::drivers::sdi::container_of_interface;
 use crate::hid::{HidColl, HidDev};
 use crate::util::{Deadline, hex4, sleep_ms};
 
 const VID: u16 = 0x24AE;
 const VT9: u16 = 0x185A;
 const VT3: u16 = 0x1417;
+const VT3SE: u16 = 0x189F;
 
 const HEADER: [u8; 2] = [0xBB, 0xB0];
 const REPORT_LEN: usize = 7;
@@ -38,6 +52,16 @@ const STATUS_LEN: usize = 19;
 const STATUS_LISTEN_MS: u64 = 11_000;
 const STATUS_QUICK_MS: u64 = 1_500;
 const VT3_MOUSE_PID: u16 = 0x4617;
+
+const VT3SE_STATUS: u8 = 0x06;
+const VT3SE_SUBTYPE: u8 = 0x56;
+/// The dongle answers the trigger right away; a short wait is enough.
+const VT3SE_REPLY_MS: u64 = 2000;
+/// The quick read must not hold the 10 s timer for long.
+const VT3SE_QUICK_MS: u64 = 800;
+
+/// Exact feature report (report ID 0x00 + 8-byte payload) that makes a VT3SE answer.
+pub const TRIGGER: [u8; 9] = [0x00, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E];
 
 /// Battery level from one legacy input report, if it is the receiver's status report.
 pub fn decode(r: &[u8]) -> Option<i32> {
@@ -54,6 +78,11 @@ pub fn decode_status(r: &[u8]) -> Option<(i32, bool)> {
     (u16::from_le_bytes([r[13], r[14]]) == VT3_MOUSE_PID).then_some((r[8] as i32, r[7] == 2))
 }
 
+/// Battery level from a VT3SE input report on FF01:0001 (report ID included), 0..=100.
+pub fn decode_vt3se(r: &[u8]) -> Option<i32> {
+    (r.len() >= 3 && r[0] == VT3SE_STATUS && r[1] == VT3SE_SUBTYPE && r[2] <= 100).then(|| r[2] as i32)
+}
+
 fn listen<T>(c: &HidColl, ms: u64, parse: impl Fn(&[u8]) -> Option<T>) -> Option<T> {
     let d = HidDev::open_read_only(c)?;
     let end = Deadline::in_ms(ms);
@@ -68,6 +97,39 @@ fn listen<T>(c: &HidColl, ms: u64, parse: impl Fn(&[u8]) -> Option<T>) -> Option
         }
     }
     None
+}
+
+/// Asks a VT3SE for its level: one feature report out, one input report back.
+fn read_vt3se(input: &HidColl, trigger: &HidColl, ms: u64) -> Option<i32> {
+    let rx = HidDev::open_read_only(input).or_else(|| HidDev::open(input))?;
+    let tx = HidDev::open_feature_only(trigger).or_else(|| HidDev::open(trigger))?;
+    rx.flush();
+    if !tx.set_feature(&TRIGGER) {
+        return None;
+    }
+    let end = Deadline::in_ms(ms);
+    while !end.passed() {
+        if let Some(pct) = rx.read(end.left_ms()).and_then(|r| decode_vt3se(&r)) {
+            return Some(pct);
+        }
+    }
+    None
+}
+
+/// Pairs each input collection with the feature collection of the same interface (a dongle can
+/// expose several), falling back to the only one when there is exactly one of each.
+fn paired<'a>(inputs: &'a [HidColl], triggers: &'a [HidColl]) -> Vec<(&'a HidColl, &'a HidColl)> {
+    if inputs.len() == 1 && triggers.len() == 1 {
+        return vec![(&inputs[0], &triggers[0])];
+    }
+    let mut out = Vec::new();
+    for input in inputs {
+        let Some(ic) = container_of_interface(&input.path) else { continue };
+        if let Some(trigger) = triggers.iter().find(|t| container_of_interface(&t.path).as_deref() == Some(ic.as_str())) {
+            out.push((input, trigger));
+        }
+    }
+    out
 }
 
 fn poll_all(ctx: &mut PollContext, quick: bool) {
@@ -113,14 +175,44 @@ fn poll_all(ctx: &mut PollContext, quick: bool) {
     );
 }
 
+fn poll_vt3se(ctx: &mut PollContext, quick: bool) {
+    if ctx.is_claimed(VID, VT3SE) {
+        return;
+    }
+    let inputs = ctx.find(VID, VT3SE, |c| c.page() == 0xFF01 && c.usage() == 0x0001 && c.in_len() >= 8);
+    let triggers = ctx.find(VID, VT3SE, |c| c.page() == 0xFF02 && c.usage() == 0x0001 && c.feat_len() == TRIGGER.len() as u16);
+    let pairs = paired(&inputs, &triggers);
+    if pairs.is_empty() {
+        return;
+    }
+    let ms = if quick { VT3SE_QUICK_MS } else { VT3SE_REPLY_MS };
+    let Some(percent) = pairs.iter().find_map(|(input, trigger)| read_vt3se(input, trigger, ms)) else { return };
+    ctx.add(
+        DeviceStatus {
+            key: "rapoo:vt3se".into(),
+            name: "Rapoo VT3SE".into(),
+            kind: DeviceKind::Mouse,
+            via: "2.4 GHz receiver".into(),
+            hw: Some((VID, VT3SE)),
+            grace_sec: 1800,
+            percent,
+            ..Default::default()
+        },
+        VID,
+        VT3SE,
+    );
+}
+
 /// Full poll: wait long enough for the VT3's idle heartbeat.
 pub fn poll(ctx: &mut PollContext) {
     poll_all(ctx, false);
+    poll_vt3se(ctx, false);
 }
 
 /// Quick poll (offline / asleep devices): only a short listen, so the 10 s timer is not blocked.
 pub fn poll_quick(ctx: &mut PollContext) {
     poll_all(ctx, true);
+    poll_vt3se(ctx, true);
 }
 
 #[cfg(test)]
@@ -182,5 +274,29 @@ mod tests {
         r[14] = 0x00; // not the mouse we know
         assert_eq!(decode_status(&r), None);
         assert_eq!(decode_status(&status(50, 0)[..18]), None); // short read
+    }
+
+    #[test]
+    fn vt3se_trigger_frame() {
+        assert_eq!(TRIGGER, [0x00, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E]);
+        assert_eq!(0xFFu8.wrapping_sub(TRIGGER[1].wrapping_add(TRIGGER[2])), TRIGGER[8]);
+    }
+
+    #[test]
+    fn vt3se_replies() {
+        // Captured live: 06 56 61 00 00 00 00 00 -> 97 %.
+        assert_eq!(decode_vt3se(&[0x06, 0x56, 0x61, 0, 0, 0, 0, 0]), Some(97));
+        assert_eq!(decode_vt3se(&[0x06, 0x56, 0x00, 0, 0, 0, 0, 0]), Some(0));
+        assert_eq!(decode_vt3se(&[0x06, 0x56, 0x64, 0, 0, 0, 0, 0]), Some(100));
+    }
+
+    #[test]
+    fn vt3se_rejects_other_reports() {
+        assert_eq!(decode_vt3se(&[0x06, 0x56, 0x65, 0, 0, 0, 0, 0]), None);
+        assert_eq!(decode_vt3se(&[0x06, 0x55, 0x61, 0, 0, 0, 0, 0]), None);
+        assert_eq!(decode_vt3se(&[0x05, 0x56, 0x61, 0, 0, 0, 0, 0]), None);
+        assert_eq!(decode_vt3se(&[0x06, 0x56]), None);
+        // A VT9 frame is not a VT3SE answer even though it also starts with a level byte.
+        assert_eq!(decode_vt3se(&frame(50)), None);
     }
 }

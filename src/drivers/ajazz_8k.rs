@@ -21,6 +21,7 @@ const PID: u16 = 0x5007;
 const POLL: u8 = 0xF7;
 const STATUS_REPORT: u8 = 0x05;
 const SETTLE_MS: u64 = 30;
+const TRIES: u64 = 5;
 
 pub fn request() -> [u8; 2] {
     [0x00, POLL]
@@ -36,11 +37,18 @@ pub fn parse(r: &[u8]) -> Option<i32> {
 
 fn read(c: &HidColl) -> Option<i32> {
     let d = HidDev::open_feature_only(c)?;
-    if !d.set_feature(&request()) {
-        return None;
+    // The vendor app polls about once a second, so the first answer can still be the empty one:
+    // ask a few times, waiting a little longer each time (about 0.45 s in all).
+    for attempt in 1..=TRIES {
+        if !d.set_feature(&request()) {
+            return None;
+        }
+        sleep_ms(SETTLE_MS * attempt);
+        if let Some(level) = d.get_feature(STATUS_REPORT).and_then(|r| parse(&r)) {
+            return Some(level);
+        }
     }
-    sleep_ms(SETTLE_MS);
-    parse(&d.get_feature(STATUS_REPORT)?)
+    None
 }
 
 pub fn poll(ctx: &mut PollContext) {

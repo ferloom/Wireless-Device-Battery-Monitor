@@ -81,6 +81,20 @@ fn decode(v: &[u8]) -> Option<(u16, &[u8])> {
     Some((u16::from_be_bytes([v[0], v[1]]), &v[8..8 + len]))
 }
 
+/// The battery answer among the notifications received so far; other ones are ignored.
+fn battery_reply(frames: &[Vec<u8>]) -> Option<Battery> {
+    frames
+        .iter()
+        .filter_map(|v| decode(v))
+        .filter(|(opcode, _)| matches!(*opcode, OP_BATTERY | OP_BATTERY_NOTIFY))
+        .find_map(|(_, payload)| battery(payload))
+}
+
+/// The device key of the buds at Bluetooth address `addr`.
+pub(super) fn key(addr: u64) -> String {
+    format!("moto:{addr:012X}")
+}
+
 fn bytes(buf: &IBuffer) -> Option<Vec<u8>> {
     let len = buf.Length().ok()? as usize;
     let reader = DataReader::FromBuffer(buf).ok()?;
@@ -227,15 +241,10 @@ fn ask(link: &Link) -> Option<Battery> {
     }
     let end = Instant::now() + Duration::from_millis(2500);
     loop {
-        if let Ok(mut m) = link.frames.lock()
-            && let Some(v) = m.iter().find_map(|v| decode(v))
+        if let Ok(m) = link.frames.lock()
+            && let Some(b) = battery_reply(&m)
         {
-            if matches!(v.0, OP_BATTERY | OP_BATTERY_NOTIFY) {
-                if let Some(b) = battery(v.1) {
-                    return Some(b);
-                }
-            }
-            m.clear(); // keep waiting for the battery answer, ignore other notifications
+            return Some(b);
         }
         if Instant::now() >= end {
             return None;
@@ -300,7 +309,7 @@ pub fn poll(ctx: &mut PollContext) {
         let (percent, charging) = buds.weaker().unwrap_or((b.case, b.case_chg));
         let case = buds.case.map(|(p, c)| format!("case {p}%{}", if c { " ⚡" } else { "" })).unwrap_or_default();
         let s = DeviceStatus {
-            key: format!("moto:{:012X}", d.addr),
+            key: key(d.addr),
             name: if d.known_name { d.name } else { "Moto Buds".into() },
             kind: DeviceKind::Earbuds,
             via: "Bluetooth".into(),
@@ -336,6 +345,13 @@ mod tests {
         let reply = frame(OP_BATTERY_NOTIFY, 7, &[50, 72, 90]);
         assert_eq!(decode(&reply), Some((OP_BATTERY_NOTIFY, &[50, 72, 90][..])));
         assert_eq!(decode(&reply[..10]), None);
+    }
+
+    #[test]
+    fn the_battery_answer_is_found_after_other_notifications() {
+        let frames = [frame(1, 1, &[0]), vec![0, 5], frame(OP_BATTERY, 1, &[50, 60, 70])];
+        assert_eq!(battery_reply(&frames).map(|b| (b.left, b.right, b.case)), Some((50, 60, 70)));
+        assert_eq!(battery_reply(&frames[..2]), None);
     }
 
     #[test]

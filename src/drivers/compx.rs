@@ -1,7 +1,8 @@
 //! Mice on CompX's "report 8" protocol (VID 3554, CompX's ODM id, ATK's 373B and Pulsar's 3710): Pulsar X2 V2 /
 //! X2H / X2A / Xlite V3, XS-1 TenZ, Kysona M600, ATK VXE R1 SE+, VXE Dragonfly R1 Pro (Max) and the LAMZU
 //! Atlantis / Thorn generation on the "LAMZU 4K Receiver", and the Attack Shark R11 Ultra. Each product id is listed explicitly;
-//! nothing else on these vendor ids gets a frame (3554:FA09 / FB40 are AULA keyboards, aula.rs).
+//! nothing else on these vendor ids gets a frame (3554:FA09 is an AULA keyboard receiver, aula.rs; on the shared
+//! 3554:FB40 only a 17-byte FF02:0002 collection is asked, AULA's reports there are 20 bytes).
 //!
 //! Protocol and ids as documented by the Linux kernel's hid-pulsar driver (GPL-2.0+,
 //! drivers/hid/hid-pulsar.c and hid-ids.h, formerly hid-kysona), vxe-r1-pro-max-battery (MIT,
@@ -46,7 +47,7 @@ const fn p(vid: u16, pid: u16, name: &'static str, group: &'static str, cable: b
     Product { vid, pid, name, group, cable }
 }
 
-const PRODUCTS: [Product; 24] = [
+const PRODUCTS: [Product; 38] = [
     p(0x3554, 0xF5BC, "Dark Project ME5 Pro", "darkproject-me5", false),
     p(0x3554, 0xF508, "Pulsar mouse", "pulsar1k", false),
     p(0x3554, 0xF509, "Pulsar mouse", "pulsar4k", false),
@@ -68,6 +69,8 @@ const PRODUCTS: [Product; 24] = [
     // ATK NK receiver: measured on an ATK A9 SE by HaloBattery (providers/pulsar.py, issue #347),
     // also listed by Joule; other ATK mice share it.
     p(0x373B, 0x10C9, "ATK mouse", "atk10c9", false),
+    // ATK Dragonfly A9 Mini+ on the "Wireless mouse 8k dongle-L": checked on hardware.
+    p(0x373B, 0x1278, "ATK mouse", "atk8k", false),
     // Pulsar XS-1 8K Gen.2 receiver and its wired TenZ identity; both use report 8.
     p(0x3710, 0x5406, "Pulsar TenZ", "pulsar-xs1", false),
     // 3710:3415 / interface 1 / FF02:0002 (17-byte reports), verified with the original BatteryHub.
@@ -87,6 +90,29 @@ const PRODUCTS: [Product; 24] = [
     p(0x3770, 0x0200, "Hitscan Hyperlight", "hitscan", false),
     p(0x3770, 0x0300, "Hitscan Hyperlight", "hitscan", false),
     p(0x3770, 0x0100, "Hitscan Hyperlight", "hitscan", true),
+    // Scyrox "Turbo 8k" dongle, also under Attack Shark, KSN and EWEADN 8K mice (#223, #526, #546,
+    // #598, #662); read on a Scyrox V8S in OpenMouse mouse-protocol (AGPL-3.0, docs/scyrox-v8s-testing.md).
+    p(0x3554, 0xF517, "Wireless mouse", "f517", false),
+    // The VXE R1 SE+ receiver (#415, #597, #640, #765), verified in OpenMouse mouse-protocol
+    // (src/drivers/atk).
+    p(0x3554, 0xF58E, "VXE R1 SE+", "r1se", false),
+    // GravaStar Mercury X PRO receiver (#646, #665): id from GravaStar's Control Hub, as listed in
+    // OpenMouse mouse-protocol (src/drivers/gravastar).
+    p(0x3554, 0xF54B, "GravaStar Mercury X", "mercuryx-f54b", false),
+    // ATK X1 Ultimate 2.0+ (#752): ATK HUB's device table, as extracted in OpenMouse mouse-protocol.
+    p(0x373B, 0x1286, "ATK X1 Ultimate", "atk1286", false),
+    // Not confirmed per id: receivers reported with the same collections (FF02:0002 17/17 plus
+    // FF03..FF05). Only the read-only commands 03 and 04 are sent and only a checksummed reply
+    // counts; a receiver that does not answer is left out.
+    p(0x3554, 0xF53E, "Dark Project Nexus", "f53e", false), // #52, #614
+    p(0x3554, 0xF55D, "Redragon mouse", "f55d", false), // #655, #656
+    p(0x3554, 0xFB3F, "IO Aurora Pro", "fb3f", false), // #626, #673
+    p(0x3554, 0xFB50, "VGN DragonFly F1 SE", "fb50", false), // #701
+    p(0x3554, 0xFB5C, "Kreo Anzu", "fb5c", false), // #739
+    p(0x3554, 0xF503, "VGN / ATK Dragonfly F1", "f503", false), // #298, #711, #722
+    p(0x3554, 0xF5E4, "Monka mouse", "f5e4", false),
+    p(0x379A, 0x3328, "HATOR Quasar 3 PRO", "quasar3pro", false),
+    p(0x3554, 0xFB40, "IO Aurora Pro", "fb40", false), // receiver id shared with AULA keyboards
 ];
 
 pub fn checksum(b: &[u8]) -> u8 {
@@ -183,6 +209,8 @@ fn add_or_merge(ctx: &mut PollContext, mut s: DeviceStatus, prod: &Product, vid:
 fn battery_collection(vid: u16, c: &HidColl) -> bool {
     if vid == 0x3710 || (vid == 0x3554 && c.pid == 0xF5BC) {
         c.page() == 0xFF02 && c.usage() == 0x0002 && c.iface == 1 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
+    } else if vid == 0x3554 && c.pid == 0xFB40 {
+        c.page() == 0xFF02 && c.usage() == 0x0002 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
     } else {
         c.page() >= 0xFF00 && c.in_len() as usize == LEN && c.out_len() as usize == LEN
     }
@@ -340,7 +368,7 @@ mod tests {
 
     #[test]
     fn only_listed_ids() {
-        assert!(PRODUCTS.iter().all(|p| !(p.vid == 0x3554 && (p.pid == 0xFA09 || p.pid == 0xFB40))));
+        assert!(PRODUCTS.iter().all(|p| !(p.vid == 0x3554 && p.pid == 0xFA09)));
         assert!(PRODUCTS.iter().any(|p| p.pid == 0xF58C && p.cable));
         assert!(PRODUCTS.iter().any(|p| p.pid == 0xF510 && !p.cable));
         assert!(PRODUCTS.iter().any(|p| p.vid == 0x3710 && p.pid == 0x5406 && p.name == "Pulsar TenZ"));

@@ -76,8 +76,14 @@ pub fn poll(ctx: &mut PollContext) {
             continue;
         }
         let colls = ctx.find(VID, pid, |c| c.page() == 0xFFA0 && c.usage() == 0x0001 && c.feat_len() as usize >= LEN);
+        // Cable and receiver are one mouse (one key): the cable's answer, read first, stands.
+        let key = format!("ninjutso:{}:{}", hex4(VID).to_lowercase(), hex4(RECEIVER).to_lowercase());
+        if ctx.out.iter().any(|o| o.key == key) {
+            ctx.claim(VID, pid);
+            continue;
+        }
         let base = DeviceStatus {
-            key: format!("ninjutso:{}:{}", hex4(VID).to_lowercase(), hex4(pid).to_lowercase()),
+            key,
             name: "Ninjutso Sora V2".into(),
             kind: DeviceKind::Mouse,
             via: if pid == CABLE { "USB cable" } else { "2.4 GHz receiver" }.into(),
@@ -86,7 +92,8 @@ pub fn poll(ctx: &mut PollContext) {
             ..Default::default()
         };
         let s = match colls.iter().find_map(|c| query(c, pid == CABLE)) {
-            Some(Reading::Level(percent, charging, full)) => DeviceStatus { percent, charging, full, ..base },
+            // On its cable the mouse is on power, also when the reply does not say so (#753).
+            Some(Reading::Level(percent, charging, full)) => DeviceStatus { percent, charging: charging || (pid == CABLE && !full), full, ..base },
             Some(Reading::Asleep) => DeviceStatus { connected: false, ..base },
             None => continue,
         };

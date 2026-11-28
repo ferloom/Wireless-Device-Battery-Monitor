@@ -449,6 +449,12 @@ pub fn forget_device(settings_key: &str, device_key: &str) {
             k.delete_value(device_key);
         }
     }
+    // Connections joined into it have no device to be read as any more.
+    for (member, target) in merged_targets(settings_key) {
+        if target == device_key {
+            clear_merged(settings_key, &member);
+        }
+    }
 }
 
 // ---- two connections of one device (#644) ------------------------------------------------------
@@ -615,6 +621,17 @@ pub fn mark_seen(settings_key: &str, keys: &[String], now: u64) -> bool {
     inst::create(HKCU, &sub(settings_key, "Seen")).is_some_and(|k| keys.iter().all(|key| k.set_dword(key, now as u32)))
 }
 
+/// The keys to forget, going by `seen` (when each was last read). A joined connection is read under
+/// its target's key (#644), so it is never dated itself: it stays and goes with its target.
+fn expired(seen: &HashMap<String, u64>, merged: &HashMap<String, String>, now: u64) -> Vec<String> {
+    let old = |key: &str| seen.get(key).is_some_and(|t| now.saturating_sub(*t) > FORGET_SECS);
+    seen.keys()
+        .chain(merged.keys().filter(|m| !seen.contains_key(*m)))
+        .filter(|k| old(&resolve_merged(merged, k)))
+        .cloned()
+        .collect()
+}
+
 /// Forgets every device last seen more than FORGET_SECS before `now`; returns their keys. A device
 /// with settings but no date yet (saved by an older version) is dated `now`.
 pub fn forget_unseen(settings_key: &str, now: u64) -> Vec<String> {
@@ -629,7 +646,7 @@ pub fn forget_unseen(settings_key: &str, now: u64) -> Vec<String> {
     if !undated.is_empty() {
         mark_seen(settings_key, &undated, now);
     }
-    let gone: Vec<String> = seen.into_iter().filter(|(_, t)| now.saturating_sub(*t) > FORGET_SECS).map(|(k, _)| k).collect();
+    let gone = expired(&seen, &merged_targets(settings_key), now);
     if gone.is_empty() {
         return gone;
     }
@@ -859,17 +876,14 @@ pub fn append_device_menus(
             icons.set(sub, id(ITEM_SAME_NAME_PROMPT) as u32, false, glyph::SYNC);
             // Two connections of one physical device read as one (#644).
             let merged = merged_targets(settings_key);
-            // A device already joined can only be separated, not joined again.
-            if devices.len() > 1 && !is_merged(&merged, &d.key) {
+            // A device already joined can only be separated, not joined again (nor joined into).
+            let targets: Vec<usize> = (0..devices.len()).filter(|&j| j != i && !is_merged(&merged, &devices[j].key)).collect();
+            if !targets.is_empty() && !is_merged(&merged, &d.key) {
                 if let Ok(join) = CreatePopupMenu() {
-                    for (j, other) in devices.iter().enumerate() {
-                        if j == i {
-                            continue;
-                        }
+                    for j in targets {
+                        let other = &devices[j];
                         let label = format!("{} ({})", other.name, other.via);
-                        let on = merged.get(&d.key).is_some_and(|t| t == &other.key);
-                        let check = if on { MF_CHECKED } else { MF_UNCHECKED };
-                        let _ = AppendMenuW(join, MF_STRING | check, MERGE_ID_BASE + i * MERGE_STRIDE + j, &hs(&label));
+                        let _ = AppendMenuW(join, MF_STRING, MERGE_ID_BASE + i * MERGE_STRIDE + j, &hs(&label));
                     }
                     let n = windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(Some(sub));
                     let _ = AppendMenuW(sub, MF_STRING | MF_POPUP, join.0 as usize, &hs(&tr("Join with another connection")));
@@ -1045,6 +1059,22 @@ mod tests {
         assert_eq!(duplicate_pair_key("b", "a"), "a|b");
         assert_eq!(duplicate_pair_key("a", "b"), "a|b");
         assert_ne!(duplicate_pair_key("a", "b"), duplicate_pair_key("a", "c"));
+    }
+
+    #[test]
+    fn a_joined_connection_expires_only_with_its_target() {
+        let now = 10 * FORGET_SECS;
+        let old = now - FORGET_SECS - 1;
+        let merged = HashMap::from([("member".to_string(), "target".to_string())]);
+        // The member is never dated again after the join: the target in use keeps it.
+        let seen = HashMap::from([("member".to_string(), old), ("target".to_string(), now), ("other".to_string(), old)]);
+        assert_eq!(expired(&seen, &merged, now), ["other"]);
+        // The target goes: the member too, dated or not.
+        for seen in [HashMap::from([("target".to_string(), old)]), HashMap::from([("target".to_string(), old), ("member".to_string(), now)])] {
+            let mut gone = expired(&seen, &merged, now);
+            gone.sort();
+            assert_eq!(gone, ["member", "target"]);
+        }
     }
 
     #[test]

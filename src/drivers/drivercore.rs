@@ -16,6 +16,9 @@ use crate::hid::{self, HidColl, HidDev};
 use crate::util::{hex4, sleep_ms};
 
 const VID: u16 = 0x373E;
+/// LAMZU's other vendor id: only these receivers, as its bootloader ids must not get the query.
+/// Paro Aurora 8K (#778), listed on the same query in OpenMouse mouse-protocol (src/lamzu).
+const LAMZU_37B0: [u16; 1] = [0x000E];
 const QUERY: [u8; 7] = [0x00, 0x00, 0x00, 0x02, 0x02, 0x00, 0x83];
 
 #[derive(Debug, PartialEq)]
@@ -60,8 +63,16 @@ fn query(c: &HidColl) -> Option<Reply> {
     None
 }
 
+fn key(vid: u16, pid: u16) -> String {
+    if vid == VID { format!("drivercore:{}", hex4(pid)) } else { format!("drivercore:{}:{}", hex4(vid), hex4(pid)) }
+}
+
 pub fn poll(ctx: &mut PollContext) {
-    for (vid, pid) in ctx.products(VID) {
+    let lamzu = LAMZU_37B0.map(|pid| (0x37B0, pid));
+    for (vid, pid) in ctx.products(VID).into_iter().chain(lamzu) {
+        if ctx.is_claimed(vid, pid) {
+            continue;
+        }
         let colls = ctx.find(vid, pid, |c| c.page() == 0xFFFF && c.feat_len() == 65);
         if colls.is_empty() {
             continue;
@@ -69,7 +80,7 @@ pub fn poll(ctx: &mut PollContext) {
         let product = crate::report::clean_name(&hid::product_string(&colls[0]));
         let name = if product.is_empty() || product == "?" { format!("Mouse {}", hex4(pid)) } else { product };
         let base = DeviceStatus {
-            key: format!("drivercore:{}", hex4(pid)),
+            key: key(vid, pid),
             name,
             kind: DeviceKind::Mouse,
             via: "2.4 GHz receiver".into(),
@@ -94,6 +105,12 @@ mod tests {
         let o = lead as usize;
         r[o..o + 8].copy_from_slice(&[st, 0x00, 0x00, 0x02, 0x02, 0x83, chg, lvl]);
         r
+    }
+
+    #[test]
+    fn the_other_vendor_id_has_its_own_keys() {
+        assert_ne!(key(VID, 0x000E), key(0x37B0, 0x000E));
+        assert_eq!(key(VID, 0x0022), format!("drivercore:{}", hex4(0x0022)));
     }
 
     #[test]
