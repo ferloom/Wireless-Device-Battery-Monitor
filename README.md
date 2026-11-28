@@ -271,6 +271,16 @@ The strip is a small layered window placed inside the taskbar, left of the notif
 | Vertical taskbar (left or right, Windows 11) | Strip as a column above the notification area; the hover card opens beside the taskbar |
 | Unknown Explorer layout, or the strip cannot be placed for 3 s | **One notification-area icon per device** (level drawn in the icon, a short tooltip and the same menu), back to the strip when possible |
 
+### Place the interactive widget inside the notification area (Windows 11)
+
+On a horizontal primary taskbar, the strip can occupy four adjacent notification-area slots while keeping its usual hover cards and right-click menu. To try this placement:
+
+1. Turn off **Widget → Show as notification-area icons (Windows arranges them)**.
+2. Set the DWORD `WidgetInsideTray` to `1` under `HKEY_CURRENT_USER\Software\BatteryHub\Taskbar`, then restart BatteryHub.
+3. In Windows taskbar settings, enable the four entries named `BatteryHub widget 1/4` through `4/4`. Keep the four slots together where you want the widget.
+
+If the slots are hidden, separated, or too narrow for the strip, BatteryHub uses its usual placement. To release the slots and return to that placement, set `WidgetInsideTray` to `0` and restart BatteryHub.
+
 ## Supported devices
 
 | Family | Notes |
